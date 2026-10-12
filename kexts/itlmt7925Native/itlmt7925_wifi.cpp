@@ -55,6 +55,8 @@ private:
     void dropInterface();
 
     IO80211WorkQueue *wq = nullptr;
+    bool started = false;                   // IO80211Controller::start returned (getWorkLoop mode 1 switches to wq after it)
+    uint32_t wlMode = 0;                    // itlmt_native_wl
     IOWorkLoop *loop = nullptr;             // fallback IOWorkLoop when the provider has none (a real thread, unlike wq)
     CCPipe *logPipe = nullptr;
     CCStream *logStream = nullptr;          // a CCLogStream (options type 0)
@@ -190,6 +192,8 @@ bool itlmt7925Wifi::start(IOService *provider)
         IOLog(LOGT "IO80211Controller::start failed\n");
         return false;
     }
+    PE_parse_boot_argn("itlmt_native_wl", &wlMode, sizeof(wlMode));
+    started = true;
     registerService();
     uint32_t withIf = 0;
     if (PE_parse_boot_argn("itlmt_native_if", &withIf, sizeof(withIf)) && withIf) {
@@ -291,8 +295,17 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
     iface = ifc;
     // AppleBCMWLANCore::setupDriver clears the deferral on its interface with deferBSDAttach(false) (removeProperty
     // IODeferBSDAttach + registerService(0)), which lets IOSkywalkNetworkBSDClient attach. itlmt_native_publish >= 2 does it here.
-    uint32_t publish = 2;
+    uint32_t publish = 1;
     PE_parse_boot_argn("itlmt_native_publish", &publish, sizeof(publish));
+    {
+        // Evidence for the IO80211Glue.cpp:417 panic: which work loop each layer sees and the gate/thread state right now.
+        IOWorkLoop *pl = getProvider() ? getProvider()->getWorkLoop() : nullptr;
+        IOWorkLoop *cl = getWorkLoop();
+        IOWorkLoop *il = ifc->getWorkLoop();
+        IOWorkLoop *w = (IOWorkLoop *)wq;
+        itlmtTrace(this, "mk:loops wq=%p provider=%p ctl=%p iface=%p wq.inGate=%d wq.onThread=%d", w, pl, cl, il,
+                   w ? w->inGate() : -1, w ? w->onThread() : -1);
+    }
     if (role == 1 && publish >= 2) {
         IOReturn dr = ifc->deferBSDAttach(false);
         itlmtTrace(this, "mk:deferBSDAttach(false)=%x", dr);
@@ -348,8 +361,12 @@ IO80211WorkQueue *itlmt7925Wifi::getWorkQueue() const
 // NULL, so returning the queue (what IO80211Controller::getWorkLoop evidently does) panicked at 0.47 s in stage A.
 // Return the provider's real work loop, so the compare matches and the call is skipped; fall back to an own IOWorkLoop
 // (real thread) so the call would be harmless if it were reached.
+// itlmt_native_wl=1 (experiment): once start has returned, answer with the IO80211WorkQueue like Apple's controller does. The
+// BSD client's command gate and IO80211Glue's inGate()/onThread() check (panic IO80211Glue.cpp:417) are suspected to use the loop
+// reached through getWorkLoop(); chưa xác định (round 10 dumps decide).
 IOWorkLoop *itlmt7925Wifi::getWorkLoop() const
 {
+    if (started && wlMode == 1 && wq) return (IOWorkLoop *)wq;
     IOService *p = getProvider();
     IOWorkLoop *l = p ? p->getWorkLoop() : nullptr;
     if (l) return l;

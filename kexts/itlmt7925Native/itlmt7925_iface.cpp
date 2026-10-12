@@ -173,8 +173,8 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
         return false;
     }
     // AppleBCMWLANSkywalkInterface::start, after a successful registerInfraEthernetInterface: registerService(kIOServiceAsynchronous)
-    // (call [vptr+0x5b0]) then setRunningState(false) (call [vptr+0x930]). Gated by itlmt_native_publish >= 1 (default 2).
-    uint32_t publish = 2;
+    // (call [vptr+0x5b0]) then setRunningState(false) (call [vptr+0x930]). Gated by itlmt_native_publish >= 1 (default 1).
+    uint32_t publish = 1;
     PE_parse_boot_argn("itlmt_native_publish", &publish, sizeof(publish));
     if (getInterfaceRole() == 1 && publish >= 1) {
         registerService(kIOServiceAsynchronous);
