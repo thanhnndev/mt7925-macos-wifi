@@ -144,7 +144,10 @@ final class WifiModel: ObservableObject {
     init() {
         refresh()
         updateOrder(force: true)
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in Task { @MainActor in self?.refresh() } }
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            guard let model = self else { return }      // bind once: `self?` inside the Task is a captured weak var (macos-14 toolchain error)
+            Task { @MainActor in model.refresh() }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.autoJoin() }
     }
 
