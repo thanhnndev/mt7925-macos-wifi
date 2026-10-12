@@ -3,6 +3,9 @@
 // itlmt7925 - Ethernet interface on top of the associated MT7925 link (the "network card" macOS sees).
 // Created by itlmt7925::m3Link() after the 4-way handshake; frames to send arrive in outputPacket(), frames received from the AP are
 // pushed in with rxPacket(). The 802.11 <-> Ethernet conversion is done in itlmt7925_m3.cpp.
+// Output goes through an IOGatedOutputQueue: without a queue the stack calls outputPacket() from several threads at once (they
+// shared txb), and a frame that found the TX pool full was dropped while reporting success (25 % of the frames under load).
+// Now such a frame stalls the queue, and the driver restarts it with txKick() once the firmware returns buffers.
 #include "itlmt7925.hpp"
 
 #include <IOKit/IOWorkLoop.h>
@@ -10,6 +13,7 @@
 #include <IOKit/network/IOEthernetInterface.h>
 #include <IOKit/network/IONetworkMedium.h>
 #include <IOKit/network/IOOutputQueue.h>
+#include <IOKit/network/IOGatedOutputQueue.h>
 #include <sys/kpi_mbuf.h>
 #include <string.h>
 
@@ -20,12 +24,14 @@ public:
     bool setup(itlmt7925 *d, const uint8_t *m);
     void rxPacket(const uint8_t *e, uint32_t len);
     void setLink(bool up);
+    void txKick();
 
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
     void free() override;
     bool createWorkLoop() override;
     IOWorkLoop *getWorkLoop() const override;
+    IOOutputQueue *createOutputQueue() override;
     IOReturn getHardwareAddress(IOEthernetAddress *addr) override;
     IOReturn enable(IONetworkInterface *netif) override;
     IOReturn disable(IONetworkInterface *netif) override;
@@ -41,7 +47,8 @@ private:
     IOEthernetInterface *netif = nullptr;
     IOWorkLoop *wl = nullptr;
     IONetworkMedium *medium = nullptr;
-    uint8_t txb[1600];
+    uint8_t txb[1600];                    // outputPacket() runs under the queue's command gate, one frame at a time
+    static const UInt32 kTxQueueLen = 512;
 };
 
 #define super IOEthernetController
@@ -63,6 +70,12 @@ bool itlmt7925Eth::createWorkLoop()
 IOWorkLoop *itlmt7925Eth::getWorkLoop() const
 {
     return wl;
+}
+
+IOOutputQueue *itlmt7925Eth::createOutputQueue()
+{
+    if (!createWorkLoop()) return nullptr;
+    return IOGatedOutputQueue::withTarget(this, wl, kTxQueueLen);
 }
 
 bool itlmt7925Eth::start(IOService *provider)
@@ -87,6 +100,7 @@ bool itlmt7925Eth::start(IOService *provider)
     if (!ok) return false;
 
     if (!attachInterface((IONetworkInterface **)&netif, true)) return false;
+    if (IOOutputQueue *q = getOutputQueue()) q->start();
     registerService();
     return true;
 }
@@ -112,11 +126,13 @@ IOReturn itlmt7925Eth::getHardwareAddress(IOEthernetAddress *a)
 
 IOReturn itlmt7925Eth::enable(IONetworkInterface *)
 {
+    if (IOOutputQueue *q = getOutputQueue()) q->start();
     return kIOReturnSuccess;
 }
 
 IOReturn itlmt7925Eth::disable(IONetworkInterface *)
 {
+    if (IOOutputQueue *q = getOutputQueue()) { q->stop(); q->flush(); }
     return kIOReturnSuccess;
 }
 
@@ -148,12 +164,19 @@ UInt32 itlmt7925Eth::outputPacket(mbuf_t m, void *)
 {
     if (!m) return kIOReturnOutputDropped;
     size_t len = mbuf_pkthdr_len(m);
+    int r = -1;
     if (len >= 14 && len <= sizeof(txb) && drv) {
         mbuf_copydata(m, 0, len, txb);
-        drv->ethTx(txb, (uint32_t)len);
+        r = drv->ethTx(txb, (uint32_t)len);
     }
+    if (r > 0) return kIOReturnOutputStall;                               // TX pool full: the queue keeps m and retries after txKick()
     freePacket(m);
-    return kIOReturnOutputSuccess;
+    return r == 0 ? kIOReturnOutputSuccess : kIOReturnOutputDropped;
+}
+
+void itlmt7925Eth::txKick()
+{
+    if (IOOutputQueue *q = getOutputQueue()) q->service(IOBasicOutputQueue::kServiceAsync);
 }
 
 // Link state for macOS: down while the driver is between networks, so DHCP and the routes follow the Wi-Fi link.
@@ -193,5 +216,12 @@ void itlmt7925::ethRx(const uint8_t *frame, uint32_t len)
 
 void itlmt7925::ethLink(bool up)
 {
-    if (eth) eth->setLink(up);
+    if (!eth) return;
+    eth->setLink(up);
+    eth->txKick();                                                         // a stalled queue drains (link down: drops) or resumes
+}
+
+void itlmt7925::ethTxKick()
+{
+    if (eth) eth->txKick();
 }

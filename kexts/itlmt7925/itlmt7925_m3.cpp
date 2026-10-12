@@ -81,6 +81,7 @@ static inline void put16(uint8_t *p, uint16_t v) { memcpy(p, &v, 2); }
 #define UNI_ROC              0x27
 #define UNI_SET_DOMAIN_INFO  0x15
 #define UNI_BSS_INFO_UPDATE  0x02
+#define UNI_EDCA_UPDATE      0x04
 
 // MCU message under construction: a fixed header (4 bytes BSS_INFO, 8 bytes STA_REC; tlv_num is at offset 2 in both)
 // followed by TLVs.
@@ -381,7 +382,54 @@ int itlmt7925::m3Bss(bool enable)
         col[4] = apCaps.heColorOn ? 1 : 0;
         col[5] = apCaps.heColor;
     }
-    return m3Cmd(UNI_BSS_INFO_UPDATE, m.b, m.n, enable ? "bss_info(enable)" : "bss_info(add)");
+    int rc = m3Cmd(UNI_BSS_INFO_UPDATE, m.b, m.n, enable ? "bss_info(enable)" : "bss_info(add)");
+    m3Edca();                                                // Linux: "ensure that enable txcmd_mode after bss_info"
+    return rc;
+}
+
+// ---------------------------------------------------------------------------------------------
+// EDCA_UPDATE (mt7925_mcu_set_tx): contention parameters of the four access categories. Linux sends it after every BSS_INFO
+// (BSS_CHANGED_QOS / add_interface); without it the firmware's AC queues kept whatever they start with, and the measured
+// uplink was ~1.1 firmware retries per frame at -39 dBm, 1.7 MB/s.
+// ---------------------------------------------------------------------------------------------
+int itlmt7925::m3Edca()
+{
+    // mac80211 AC order (VO, VI, BE, BK), as Linux passes it in edca.queue; station defaults (IEEE 802.11-2020 Table 9-155),
+    // cw as the exponent (Linux: fls(cw)), txop in 32 us units
+    uint8_t aifs[4] = {2, 2, 3, 7}, ecwMin[4] = {2, 3, 4, 4}, ecwMax[4] = {3, 4, 10, 10};
+    uint16_t txop[4] = {47, 94, 0, 0};
+    static const uint8_t aciToAc[4] = {2, 3, 1, 0};          // ACI 0 BE, 1 BK, 2 VI, 3 VO
+    bool wmm = false;
+    for (const uint8_t *e = tgtIe, *end = tgtIe + tgtIeLen; e + 2 <= end && e + 2 + e[1] <= end; e += 2 + e[1]) {
+        // WMM Parameter element: OUI 00:50:f2, type 2, subtype 1, version, QoS info, reserved, 4 AC records
+        if (e[0] != 0xdd || e[1] < 24 || e[2] != 0x00 || e[3] != 0x50 || e[4] != 0xf2 || e[5] != 2 || e[6] != 1) continue;
+        const uint8_t *r = e + 10;
+        for (int i = 0; i < 4; i++, r += 4) {
+            uint8_t ac = aciToAc[(r[0] >> 5) & 3];
+            aifs[ac] = (r[0] & 0xf) < 2 ? 2 : (r[0] & 0xf);
+            ecwMin[ac] = (r[1] & 0xf) ? (r[1] & 0xf) : 5;    // Linux: cw 0 -> 5 / 10
+            ecwMax[ac] = (r[1] >> 4) ? (r[1] >> 4) : 10;
+            txop[ac] = (uint16_t)(r[2] | (r[3] << 8));
+        }
+        wmm = true;
+        break;
+    }
+    uint8_t req[4 + 4 * 12];
+    bzero(req, sizeof(req));
+    req[0] = M3_BSS_IDX;
+    for (int ac = 0; ac < 4; ac++) {
+        uint8_t *t = req + 4 + ac * 12;
+        put16(t + 0, 0);                                     // MCU_EDCA_AC_PARAM
+        put16(t + 2, 12);
+        t[4] = (uint8_t)ac;                                  // queue
+        t[5] = 0xf;                                          // WMM_PARAM_SET: aifs | cw_min | cw_max | txop
+        t[6] = ecwMin[ac];
+        t[7] = ecwMax[ac];
+        put16(t + 8, txop[ac]);
+        t[10] = aifs[ac];
+    }
+    m3log("edca wmm=%d be aifs=%u cw=%u/%u txop=%u", wmm, aifs[2], ecwMin[2], ecwMax[2], txop[2]);
+    return m3Cmd(UNI_EDCA_UPDATE, req, sizeof(req), "edca");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -524,11 +572,16 @@ bool itlmt7925::m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t s
     uint32_t slot;
     uint16_t tok;
     if (txPool) {
-        // staging buffer owned until the firmware reports it free (TXFREE); no slot or no descriptor: drop, TCP will resend
-        if (!txSlotAlloc(&slot, &tok)) { stTxNoSlot++; return false; }
-        if ((txData.head + 1) % txData.n == (int)(rd(txData.regs + Q_DMA_IDX) & 0xffff)) {
+        // staging buffer owned until the firmware reports it free (TXFREE); no slot or no descriptor: the Ethernet output queue
+        // keeps the frame (o.full), anything else is dropped
+        bool got = txSlotAlloc(&slot, &tok);
+        if (got && (txData.head + 1) % txData.n == (int)(rd(txData.regs + Q_DMA_IDX) & 0xffff)) {
             txClrBusy(slot);
+            got = false;
+        }
+        if (!got) {
             stTxNoSlot++;
+            if (o.full) { *o.full = true; ethStalled = true; ethStallMs = nowMs(); }   // m3TxFree() restarts the queue
             return false;
         }
     } else {
@@ -1014,7 +1067,7 @@ bool itlmt7925::m3RxData(const uint8_t *p, uint32_t len)
     return false;
 }
 
-bool itlmt7925::m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect)
+bool itlmt7925::m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect, bool *full)
 {
     uint8_t f[34 + 1560];
     if (plen > 1560) return false;
@@ -1031,6 +1084,7 @@ bool itlmt7925::m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *p
     M3TxOpt o;
     o.protect = protect;
     o.rateAdapt = ra;
+    o.full = full;
     uint16_t sn = txSn;
     if (ra && lvl >= 3) {
         // Level 3: access-category queue (AC_BE -> LMAC queue 1, mt76_connac_lmac_mapping), sequence numbers chosen here so that the
@@ -1053,14 +1107,16 @@ bool itlmt7925::m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *p
     return ok;
 }
 
-// Ethernet frame from the network stack
-bool itlmt7925::ethTx(const uint8_t *e, uint32_t len)
+// Ethernet frame from the network stack (output queue thread): 0 sent, 1 TX pool full (retried after ethTxKick()), -1 dropped
+int itlmt7925::ethTx(const uint8_t *e, uint32_t len)
 {
-    if (!m3linkUp || len < 14) return false;
-    bool ok = m3TxData(e, be16p(e + 12), e + 14, len - 14, true);
+    if (!m3linkUp || len < 14) return -1;
+    bool full = false;
+    bool ok = m3TxData(e, be16p(e + 12), e + 14, len - 14, true, &full);
+    if (full) return 1;
     if (ok) stTx++; else stTxFail++;
     m3Note("tx", e, len);
-    return ok;
+    return ok ? 0 : -1;
 }
 
 // STA_REC_KEY_V3 (mt7925_mcu_sta_key_tlv): CCMP key on the AP's wcid (pairwise) or on the BSS's broadcast wcid (group)
@@ -1226,6 +1282,7 @@ void itlmt7925::m3Link()
             return;
         }
         baService();
+        if (ethStalled && now - ethStallMs >= 20) { ethStalled = false; ethTxKick(); }   // no TXFREE came: retry (txSlotAlloc reclaims)
         if (amsduAsm.active && now - amsduAsm.t >= 4) amsduFlush();      // the last subframe of an A-MSDU never came
         if (now - lastReorderMs >= 10) {                     // frames waiting behind a hole in a Block Ack window for too long
             lastReorderMs = now;

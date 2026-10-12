@@ -360,26 +360,32 @@ void itlmt7925::m3TxFree(const uint8_t *p, uint32_t len)
         return;
     }
     uint32_t count = 0;
-    BaLock lk(txLock);
-    for (const uint8_t *c = p + 8; count < total && c + 4 <= p + len; c += 4) {
-        uint32_t info = le32(c);
-        if (info & (1u << 31)) continue;                     // new wcid pair
-        if (info & (1u << 30)) {                             // header: attempts and status of the frames that follow
-            uint32_t cnt = (info >> 24) & 0xf, st = (info >> 28) & 3;
-            stTxFwRetry += cnt ? cnt - 1 : 0;
-            if (st) stTxFwFail++;
-            continue;
-        }
-        for (int i = 0; i < 2; i++) {
-            uint32_t id = (info >> (15 * i)) & 0x7fff;
-            if (id == 0x7fff) continue;
-            count++;
-            uint32_t s = id & (kTxSlots - 1);
-            if (txIsBusy(s) && txGen[s] == (id >> 8)) {
-                txClrBusy(s);
-                stTxFree++;
-                txFreeSeen = true;
+    bool kick = false;
+    {
+        BaLock lk(txLock);
+        uint32_t freed0 = stTxFree;
+        for (const uint8_t *c = p + 8; count < total && c + 4 <= p + len; c += 4) {
+            uint32_t info = le32(c);
+            if (info & (1u << 31)) continue;                     // new wcid pair
+            if (info & (1u << 30)) {                             // header: attempts and status of the frames that follow
+                uint32_t cnt = (info >> 24) & 0xf, st = (info >> 28) & 3;
+                stTxFwRetry += cnt ? cnt - 1 : 0;
+                if (st) stTxFwFail++;
+                continue;
+            }
+            for (int i = 0; i < 2; i++) {
+                uint32_t id = (info >> (15 * i)) & 0x7fff;
+                if (id == 0x7fff) continue;
+                count++;
+                uint32_t s = id & (kTxSlots - 1);
+                if (txIsBusy(s) && txGen[s] == (id >> 8)) {
+                    txClrBusy(s);
+                    stTxFree++;
+                    txFreeSeen = true;
+                }
             }
         }
+        if (ethStalled && stTxFree != freed0) { ethStalled = false; kick = true; }
     }
+    if (kick) ethTxKick();                                   // outside txLock: the queue calls back into m3Tx
 }

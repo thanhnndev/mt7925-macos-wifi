@@ -25,6 +25,7 @@ struct M3TxOpt {
     uint8_t qidx = 0x10;      // TXD0.Q_IDX: 0x10 = MT_LMAC_ALTX0 (management / non-QoS), 0..3 = access categories
     int sn = -1;              // >= 0: sequence number chosen by the host (TXD3.SN_VALID)
     bool aggr = false;        // leave BA_DISABLE clear: the frame may be sent in an A-MPDU
+    bool *full = nullptr;     // set: no staging slot / descriptor free, the caller keeps the frame (Ethernet output queue)
 };
 
 struct itl_dma_buf {
@@ -52,9 +53,11 @@ public:
     void stop(IOService *provider) override;
     void free() override;
     // Ethernet interface glue (itlmt7925_eth.cpp): frames from the network stack / frames received from the AP
-    bool ethTx(const uint8_t *frame, uint32_t len);
+    // 0 sent, 1 no TX buffer free (the output queue keeps the frame until ethTxKick()), -1 dropped
+    int  ethTx(const uint8_t *frame, uint32_t len);
     bool ethCreate();
     void ethRx(const uint8_t *frame, uint32_t len);
+    void ethTxKick();                        // TX buffers are free again (or the link changed): restart the stalled queue
     // Speed shown by macOS for the interface: the estimated best PHY rate when HT/VHT is in use, else the 54 Mb/s legacy value
     static void baDeliverCb(void *ctx, const uint8_t *frame, uint32_t len);
     uint64_t linkSpeedBps() const { return fastActive ? (uint64_t)fastRate * 1000000ull : 54000000ull; }
@@ -137,6 +140,7 @@ private:
     int  m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *name);
     int  m3HwPrep();
     int  m3Bss(bool enable);
+    int  m3Edca();                           // per-AC contention parameters from the AP's WMM element (after every BSS_INFO)
     int  m3Sta(uint8_t state, bool newly, uint16_t aid);
     int  m3Roc(bool acquire);
     void m3Pump(uint32_t ms);
@@ -178,7 +182,8 @@ private:
     bool m3Eapol(const uint8_t *eapol, uint32_t len);
     int  m3Key(uint16_t wcid, bool pairwise, uint8_t keyId, const uint8_t *key, uint8_t keyLen);
     bool m3RxData(const uint8_t *p, uint32_t len);
-    bool m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect);
+    bool m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect,
+                  bool *full = nullptr);
     void m3Note(const char *dir, const uint8_t *eth, uint32_t len);
     void m3Link();
     void nvramStat(const char *msg);
@@ -262,6 +267,8 @@ private:
     uint32_t stAmsduPkt = 0, stAmsduSub = 0, stAmsduBad = 0, stRxBigDrop = 0;
     uint32_t amsduLogged = 0, amsduBadLogged = 0, rxdLogged = 0;
     uint32_t txfWinFree = 0, txfWinFail = 0, txfBad = 0;   // TX failure watchdog (level >= 3), 5 s windows
+    volatile bool ethStalled = false;        // the Ethernet output queue is stalled on a full TX pool (under txLock)
+    uint32_t ethStallMs = 0;
     uint32_t m3RxAmsdu(const uint8_t *body, uint32_t blen, uint8_t ai, bool reorder, uint8_t tid, uint16_t sn);
     void amsduFlush();                       // hand the collected subframes to the reorder buffer
     void rxStore(const uint8_t *eb, uint32_t n, bool reorder, uint8_t tid, uint16_t sn, bool last);   // Ethernet frame -> stack / reorder buffer
