@@ -56,7 +56,7 @@ private:
 
     IO80211WorkQueue *wq = nullptr;
     bool started = false;                   // IO80211Controller::start returned (getWorkLoop mode 1 switches to wq after it)
-    uint32_t wlMode = 0;                    // itlmt_native_wl
+    uint32_t wlMode = 1;                    // itlmt_native_wl (default 1)
     IOWorkLoop *loop = nullptr;             // fallback IOWorkLoop when the provider has none (a real thread, unlike wq)
     CCPipe *logPipe = nullptr;
     CCStream *logStream = nullptr;          // a CCLogStream (options type 0)
@@ -295,7 +295,7 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
     iface = ifc;
     // AppleBCMWLANCore::setupDriver clears the deferral on its interface with deferBSDAttach(false) (removeProperty
     // IODeferBSDAttach + registerService(0)), which lets IOSkywalkNetworkBSDClient attach. itlmt_native_publish >= 2 does it here.
-    uint32_t publish = 1;
+    uint32_t publish = 2;
     PE_parse_boot_argn("itlmt_native_publish", &publish, sizeof(publish));
     {
         // Evidence for the IO80211Glue.cpp:417 panic: which work loop each layer sees and the gate/thread state right now.
@@ -303,8 +303,9 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
         IOWorkLoop *cl = getWorkLoop();
         IOWorkLoop *il = ifc->getWorkLoop();
         IOWorkLoop *w = (IOWorkLoop *)wq;
-        itlmtTrace(this, "mk:loops wq=%p provider=%p ctl=%p iface=%p wq.inGate=%d wq.onThread=%d", w, pl, cl, il,
-                   w ? w->inGate() : -1, w ? w->onThread() : -1);
+        itlmtTrace(this, "lp:wq=%p prov=%p", w, pl);
+        itlmtTrace(this, "lp:ctl=%p if=%p", cl, il);
+        itlmtTrace(this, "lp:inGate=%d onThread=%d wl=%u", w ? (int)w->inGate() : -1, w ? (int)w->onThread() : -1, wlMode);
     }
     if (role == 1 && publish >= 2) {
         IOReturn dr = ifc->deferBSDAttach(false);
@@ -361,9 +362,12 @@ IO80211WorkQueue *itlmt7925Wifi::getWorkQueue() const
 // NULL, so returning the queue (what IO80211Controller::getWorkLoop evidently does) panicked at 0.47 s in stage A.
 // Return the provider's real work loop, so the compare matches and the call is skipped; fall back to an own IOWorkLoop
 // (real thread) so the call would be harmless if it were reached.
-// itlmt_native_wl=1 (experiment): once start has returned, answer with the IO80211WorkQueue like Apple's controller does. The
-// BSD client's command gate and IO80211Glue's inGate()/onThread() check (panic IO80211Glue.cpp:417) are suspected to use the loop
-// reached through getWorkLoop(); chưa xác định (round 10 dumps decide).
+// Round 10 settled this: IO80211SkywalkInterface::start stores W = controller->getWorkQueue() in ivars+0x38 and IO80211Glue keeps it;
+// IO80211Controller::getWorkLoop() is a tail call to the same getWorkQueue slot (0xffffff800222aec0). IOSkywalkBSDClient::start gets
+// its loop through the plain IOService::getWorkLoop chain (interface -> controller) and attaches its IOCommandGate to it, and
+// prepareBSDInterface -> updateStaticProperties -> IO80211Glue::sendIOUCToWcl panics unless W->inGate() && !W->onThread(), i.e. unless
+// the BSD client's gate sits on W. So after IO80211Controller::start has returned the answer must be the IO80211WorkQueue, as in
+// Apple's controller. The early answer stays the provider's loop (stage-A ml_thread_policy(NULL) panic). itlmt_native_wl=0 disables.
 IOWorkLoop *itlmt7925Wifi::getWorkLoop() const
 {
     if (started && wlMode == 1 && wq) return (IOWorkLoop *)wq;
@@ -386,8 +390,12 @@ IO80211FaultReporter *itlmt7925Wifi::getFaultReporterFromDriver()
 }
 
 // Every request is refused until an interface exists.
-IOReturn itlmt7925Wifi::isCommandProhibited(int)
+// Only the two static-property ioctls IO80211InfraInterface::updateStaticProperties sends during BSD attach (0x2c HARDWARE_VERSION,
+// 0x2b DRIVER_VERSION) are allowed; everything else stays refused until the matching handler exists.
+IOReturn itlmt7925Wifi::isCommandProhibited(int cmd)
 {
+    if (cmd == 0x2b || cmd == 0x2c)
+        return kIOReturnSuccess;
     return kProhibited;
 }
 
@@ -396,14 +404,36 @@ IOReturn itlmt7925Wifi::handleCardSpecific(IO80211SkywalkInterface *, unsigned l
     return kIOReturnUnsupported;
 }
 
-IOReturn itlmt7925Wifi::getDRIVER_VERSION(IO80211SkywalkInterface *, apple80211_version_data *)
+// Layout of apple80211_version_data (IOKit/80211/apple80211_ioctl.h): u32 version, u16 string_len, char string[256].
+struct VersionLayout {
+    uint32_t version;
+    uint16_t stringLen;
+    char string[256];
+};
+
+static IOReturn fillVersion(apple80211_version_data *data, const char *text)
 {
-    return kIOReturnUnsupported;
+    if (!data)
+        return kIOReturnBadArgument;
+    VersionLayout *d = (VersionLayout *)data;
+    d->version = 1;
+    size_t n = strlen(text);
+    if (n > sizeof(d->string) - 1)
+        n = sizeof(d->string) - 1;
+    memcpy(d->string, text, n);
+    d->string[n] = 0;
+    d->stringLen = (uint16_t)n;
+    return kIOReturnSuccess;
 }
 
-IOReturn itlmt7925Wifi::getHARDWARE_VERSION(IO80211SkywalkInterface *, apple80211_version_data *)
+IOReturn itlmt7925Wifi::getDRIVER_VERSION(IO80211SkywalkInterface *, apple80211_version_data *d)
 {
-    return kIOReturnUnsupported;
+    return fillVersion(d, "itlmt7925Native 0.1");
+}
+
+IOReturn itlmt7925Wifi::getHARDWARE_VERSION(IO80211SkywalkInterface *, apple80211_version_data *d)
+{
+    return fillVersion(d, "MediaTek MT7925");
 }
 
 IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple80211_capability_data *)
