@@ -6,8 +6,9 @@ interface (`itlmt7925Eth`), the same trick the itlwm project uses for Intel card
 ## Status
 
 > **Update 2026-10-12 (owner-confirmed):** the driver now reaches the **full link speed** (HE, 160 MHz) with the `itlmt_fast` ladder; the
-> throughput numbers and "slow" statements below (6 Mb/s, ~8 Mb/s, ~5 MB/s) are the history of getting there. Numbers of the final
-> `iperf3` run are still to be recorded here. The **native Wi-Fi port** (`IO80211Controller`) is in progress and **does not work yet**: this driver is the one to use ([which driver, how to check, how to go back](WIFI-DRIVERS.md)).
+> throughput numbers and "slow" statements below (6 Mb/s, ~8 Mb/s, ~5 MB/s) are the history of getting there. The owner measured the
+> final speed at the maximum and will supply the numbers (`iperf3` both directions, band, channel, width, AP model, distance) for
+> comparison; they are **not recorded here yet** and were not measured by the agent. The **native Wi-Fi port** (`IO80211Controller`) is in progress and **does not work yet**: this driver is the one to use ([which driver, how to check, how to go back](WIFI-DRIVERS.md)).
 
 Verified on the reference machine (GA403WM, macOS 15.6.1 Recovery booted from a USB stick):
 
