@@ -225,8 +225,8 @@ static bool findMac(IOService *provider, uint8_t out[6])
     return found;
 }
 
-// Mirrors AppleBCMWLANCore::createSkywalkInterface (0xffffff800163aaf8, ABI-2 "Native stub, stage 2"). Role 2 is the only role the
-// RegistrationInfo path of that function handles (BSD name prefix + unit from the creation parameters).
+// Mirrors AppleBCMWLANCore::createSkywalkInterface (0xffffff800163aaf8, ABI-2 "Native stub, stage 2"). Role 2 (LowLatency) is the
+// only role that gets a BSD name prefix + unit in the RegistrationInfo; role 1 (primary) sets [info+0x10] = 1 and nothing else.
 bool itlmt7925Wifi::makeInterface(IOService *provider)
 {
     uint8_t mac[6];
@@ -236,11 +236,18 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
         memcpy(mac, fallback, 6);
         IOLog(LOGT "no IOMACAddress under the core driver, using a placeholder\n");
     }
-    uint32_t unit = 9;      // the core's Ethernet front end takes the low en units; override with itlmt_native_unit
-    PE_parse_boot_argn("itlmt_native_unit", &unit, sizeof(unit));
+    // Role 1 is the primary station interface. Role 2 (LowLatency) is a secondary one: IO80211SkywalkInterface::start needs
+    // ivars->parentInterface for it (it logs a failure at IO80211SkywalkInterface.cpp:0x1f8 otherwise), createSkywalkInterface only
+    // makes it from a bus flag and passes the parent as its 4th argument. itlmt_native_role=2 keeps the old path for comparison.
+    uint32_t role = 1;
+    PE_parse_boot_argn("itlmt_native_role", &role, sizeof(role));
+    // Role 1: createSkywalkInterface leaves the BSD name to the family. An explicit name/unit is only used when itlmt_native_unit is
+    // given (or for role 2, where Apple always passes one).
+    uint32_t unit = 9;
+    bool explicitName = PE_parse_boot_argn("itlmt_native_unit", &unit, sizeof(unit)) || role == 2;
 
-    itlmtTrace(this, "mk:start unit=%u", unit);
-    itlmt7925WifiInterface *ifc = itlmt7925WifiInterface::withController(this, 0, 2);
+    itlmtTrace(this, "mk:start role=%u unit=%u explicit=%d", role, unit, explicitName);
+    itlmt7925WifiInterface *ifc = itlmt7925WifiInterface::withController(this, 0, role);
     itlmtTrace(this, "mk:withController=%s", ifc ? "ok" : "null");
     if (!ifc) return false;
     bool att = attachInterface(ifc, this);
@@ -264,9 +271,12 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
     put<uint32_t>(block, 0x28, 0x80);
     put<uint32_t>(block, 0x0c, 3);
     put<uint16_t>(block, 0x3c, 0x40);
-    put<uint32_t>(block, 0x40, 4);
-    put<uint64_t>(block, 0x30, (uint64_t)(uintptr_t)kPrefix);
-    put<uint32_t>(block, 0x38, unit);
+    if (role == 1) put<uint32_t>(block, 0x10, 1);       // createSkywalkInterface: [info+0x10] = 1 for role 1 (meaning chưa xác định)
+    if (explicitName) {
+        put<uint32_t>(block, 0x40, 4);
+        put<uint64_t>(block, 0x30, (uint64_t)(uintptr_t)kPrefix);
+        put<uint32_t>(block, 0x38, unit);
+    }
 
     if (!ifc->startWithInfo(this, info)) {
         itlmtTrace(this, "mk:startWithInfo failed");

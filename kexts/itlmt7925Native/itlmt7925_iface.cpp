@@ -125,6 +125,11 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
         itlmtTrace(ctl, "sw:bad info");
         return false;
     }
+    // AppleBCMWLANSkywalkInterface::start: for role 1 it calls deferBSDAttach(true) before IO80211InfraInterface::start
+    if (getInterfaceRole() == 1) {
+        IOReturn dr = deferBSDAttach(true);
+        itlmtTrace(ctl, "sw:deferBSDAttach=%x", dr);
+    }
     bool sup = super::start(controller);       // IO80211InfraInterface::start(IOService *)
     itlmtTrace(ctl, "sw:IO80211InfraInterface::start=%d", sup);
     if (!sup) return false;
