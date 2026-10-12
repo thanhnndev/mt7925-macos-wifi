@@ -272,10 +272,13 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
     put<uint32_t>(block, 0x0c, 3);
     put<uint16_t>(block, 0x3c, 0x40);
     if (role == 1) put<uint32_t>(block, 0x10, 1);       // createSkywalkInterface: [info+0x10] = 1 for role 1 (meaning chưa xác định)
-    if (explicitName) {
+    // Role 1: initRegistrationInfo leaves +0x38 = 0xFFFFFFFF (unit not assigned yet) and registerNetworkInterface only sets
+    // IOInterfaceUnit for unit >= 0, so without it IOSkywalkNetworkBSDClient::start never finds IOInterfaceUnit and cannot attach.
+    // The prefix stays the Ethernet default ("en"). Role 2 keeps the explicit prefix/flags Apple passes.
+    put<uint32_t>(block, 0x38, unit);
+    if (role == 2 || explicitName) {
         put<uint32_t>(block, 0x40, 4);
         put<uint64_t>(block, 0x30, (uint64_t)(uintptr_t)kPrefix);
-        put<uint32_t>(block, 0x38, unit);
     }
 
     if (!ifc->startWithInfo(this, info)) {
@@ -286,6 +289,14 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
     }
     itlmtTrace(this, "mk:startWithInfo ok");
     iface = ifc;
+    // AppleBCMWLANCore::setupDriver clears the deferral on its interface with deferBSDAttach(false) (removeProperty
+    // IODeferBSDAttach + registerService(0)), which lets IOSkywalkNetworkBSDClient attach. itlmt_native_publish >= 2 does it here.
+    uint32_t publish = 2;
+    PE_parse_boot_argn("itlmt_native_publish", &publish, sizeof(publish));
+    if (role == 1 && publish >= 2) {
+        IOReturn dr = ifc->deferBSDAttach(false);
+        itlmtTrace(this, "mk:deferBSDAttach(false)=%x", dr);
+    }
     return true;
 }
 
