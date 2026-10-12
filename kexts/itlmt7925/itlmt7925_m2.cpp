@@ -63,6 +63,7 @@ bool itlmt7925::ringPeek(itl_ring &r, const uint8_t **data, uint32_t *len, int *
     uint8_t *d = r.desc.va + r.tail * 16;
     uint32_t ctrl = le32(d + 4);
     if (!(ctrl & MT_DMA_CTL_DMA_DONE)) return false;
+    membar();                            // acquire DMA writes before accessing the cached frame buffer
     *len = (ctrl >> 16) & 0x3fff;
     *bi = r.slotBuf[r.tail];
     *data = r.buf.va + (size_t)*bi * MT_RX_BUF_SIZE;
@@ -238,6 +239,7 @@ void itlmt7925::rxDataPoll()
         rxParseFrame(p, len);
         ringRelease(rxData, bi);
     }
+    ethFlush();
 }
 
 void itlmt7925::m2Publish()

@@ -111,10 +111,13 @@ void itlmt7925::m1log(const char *fmt, ...)
 // ---------------------------------------------------------------------------------------------
 // DMA memory + rings
 // ---------------------------------------------------------------------------------------------
-bool itlmt7925::dmaAlloc(itl_dma_buf &b, size_t size)
+// Descriptors and MCU buffers stay uncached. Frame buffers (rx data, tx staging) are cached, as Linux's page pool / streaming
+// mappings are on x86, where PCIe DMA snoops the CPU caches: copying a frame out of uncached memory costs one bus read per
+// word, and every frame is read several times (parse, reorder, copy into an mbuf).
+bool itlmt7925::dmaAlloc(itl_dma_buf &b, size_t size, bool cached)
 {
     b.md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-              kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapInhibitCache, size, 0x00000000FFFFF000ULL);
+              kIODirectionInOut | kIOMemoryPhysicallyContiguous | (cached ? 0 : kIOMapInhibitCache), size, 0x00000000FFFFF000ULL);
     if (!b.md) return false;
     b.va = (uint8_t *)b.md->getBytesNoCopy();
     b.size = size;
@@ -141,14 +144,15 @@ void itlmt7925::ringFree(itl_ring &r)
     r.n = 0;
 }
 
-bool itlmt7925::ringInit(itl_ring &r, int qid, uint32_t base, int n, bool rx)
+bool itlmt7925::ringInit(itl_ring &r, int qid, uint32_t base, int n, bool rx, bool cached)
 {
+    if (rx && n > (int)(sizeof(r.slotBuf) / sizeof(r.slotBuf[0]))) return false;
     r.n = n;
     r.regs = base + (uint32_t)qid * 0x10u;
     r.head = r.tail = 0;
     if (!dmaAlloc(r.desc, (size_t)n * 16)) return false;
     // txData stages TXD + txp + the whole 802.11 frame in 2 KiB slots (kTxSlots of them); the other tx rings need one 4 KiB buffer
-    if (!dmaAlloc(r.buf, rx ? (size_t)n * MT_RX_BUF_SIZE : (&r == &txData ? (size_t)kTxSlots * 2048 : 4096))) return false;
+    if (!dmaAlloc(r.buf, rx ? (size_t)n * MT_RX_BUF_SIZE : (&r == &txData ? (size_t)kTxSlots * 2048 : 4096), cached)) return false;
 
     // mt76_dma_queue_reset(): every descriptor starts out DMA_DONE, indices zero, then ring base/size
     for (int i = 0; i < n; i++) put32(r.desc.va + i * 16 + 4, MT_DMA_CTL_DMA_DONE);
@@ -466,14 +470,25 @@ int itlmt7925::m1Run()
     dmaDisable();
     m1log("stage 3: dma disabled glo=%08x", rdA(MT_WFDMA0_GLO_CFG));
 
+    // ring sizes as Linux (MT7925_RX_MCU_RING_SIZE 512, MT7925_RX_RING_SIZE 1536): an HE A-MPDU of 64 MPDUs carrying A-MSDUs
+    // is 200+ ring entries (the hardware de-aggregates), so 256 entries overflowed on every burst the thread was late for and
+    // the AP had to send the lost MPDUs again (6.5 % of the received frames were such retransmissions at 3.5 MB/s)
     if (!ringInit(txWm, MT7925_TXQ_MCU_WM, MT_TX_RING_BASE, 256, false) ||
         !ringInit(txFwdl, MT7925_TXQ_FWDL, MT_TX_RING_BASE, 128, false) ||
-        !ringInit(rxEvt, MT7925_RXQ_MCU_WM, MT_RX_EVENT_RING_BASE, 128, true) ||
-        // A-MPDU bursts arrive back to back: a deeper data ring when Block Ack is on
-        (m2On && !ringInit(rxData, MT7925_RXQ_BAND0, MT_RX_DATA_RING_BASE, fastLevel >= 2 ? 256 : 128, true)) ||
-        (m3On && !ringInit(txData, MT7925_TXQ_BAND0, MT_TX_RING_BASE, 256, false))) {
+        !ringInit(rxEvt, MT7925_RXQ_MCU_WM, MT_RX_EVENT_RING_BASE, 512, true) ||
+        (m3On && !ringInit(txData, MT7925_TXQ_BAND0, MT_TX_RING_BASE, 256, false, true))) {
         m1log("ring alloc failed");
         return ITL_EIO;
+    }
+    if (m2On) {
+        static const int sizes[] = {1536, 512, 256};
+        bool ok = false;
+        for (int i = fastLevel >= 2 ? 0 : 2; i < 3 && !ok; i++) {
+            ok = ringInit(rxData, MT7925_RXQ_BAND0, MT_RX_DATA_RING_BASE, sizes[i], true, true);
+            if (!ok) ringFree(rxData);
+        }
+        if (!ok) { m1log("rx data ring alloc failed"); return ITL_EIO; }
+        m1log("rx data ring %d entries", rxData.n);
     }
     m1log("stage 4: rings txwm=%llx txfwdl=%llx rx=%llx", (unsigned long long)txWm.desc.pa,
           (unsigned long long)txFwdl.desc.pa, (unsigned long long)rxEvt.desc.pa);

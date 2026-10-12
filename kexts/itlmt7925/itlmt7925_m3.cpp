@@ -124,6 +124,7 @@ int itlmt7925::m3PumpOnce()
         }
         ringRelease(rxEvt, bi);
     }
+    ethFlush();
     return (rxPkts + evCount) != before;
 }
 
@@ -295,7 +296,19 @@ int itlmt7925::m3HwPrep()
     uint8_t *w = dom + 16;
     for (unsigned i = 0; i < n2; i++, w += 8) put16(w, ch2[i]);
     for (unsigned i = 0; i < n5; i++, w += 8) put16(w, ch5[i]);
-    return m3Cmd(UNI_SET_DOMAIN_INFO, dom, (size_t)(w - dom), "set_domain");
+    int rc = m3Cmd(UNI_SET_DOMAIN_INFO, dom, (size_t)(w - dom), "set_domain");
+    if (rc) return rc;
+    if (!clcCc[0]) {
+        sarInit();
+        uint8_t encap = 0;
+        rc = efuseRead(0xa71, &encap);
+        if (rc) { m3log("efuse hw type failed rc=%d", rc); return rc; }
+        hwEncap = encap & 3;
+        rc = m3Clc("00", 1);                               // world, indoor; same domain as set_domain
+        if (!rc) rc = m3TxPower();
+        if (rc) clcCc[0] = 0;                               // retry the complete setup on the next join
+    }
+    return rc;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -802,7 +815,8 @@ int itlmt7925::m3Run1()
 
     // step 2: firmware / hardware prep, BSS + STA records in the "not associated" state, ROC on the AP's channel
     m3ParseAp();
-    m3HwPrep();
+    int prepRc = m3HwPrep();
+    if (prepRc) { m3Publish("hw-prep-fail"); return prepRc; }
     m3Bss(false);
     m3Sta(0, true, 0);
     m3Roc(true);
@@ -1289,6 +1303,7 @@ void itlmt7925::m3Link()
             for (int t = 0; t < 8; t++)
                 if (rxBa[t].r.active) itl_reorder_tick(&rxBa[t].r, now, reoMs, baDeliverCb, this);
         }
+        ethFlush();
         uint32_t up = (now - t0) / 1000;
         if (fastActive && !watchdogDone && up >= 25) {
             watchdogDone = true;

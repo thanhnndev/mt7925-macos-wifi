@@ -25,6 +25,7 @@ public:
     void rxPacket(const uint8_t *e, uint32_t len);
     void setLink(bool up);
     void txKick();
+    void flush();
 
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
@@ -49,6 +50,7 @@ private:
     IONetworkMedium *medium = nullptr;
     uint8_t txb[1600];                    // outputPacket() runs under the queue's command gate, one frame at a time
     static const UInt32 kTxQueueLen = 512;
+    uint32_t rxQueued = 0;                // frames queued on netif since the last flush()
 };
 
 #define super IOEthernetController
@@ -194,6 +196,14 @@ void itlmt7925Eth::rxPacket(const uint8_t *e, uint32_t len)
     if (!m) return;
     memcpy(mbuf_data(m), e, len);
     netif->inputPacket(m, len, IONetworkInterface::kInputOptionQueuePacket);
+    if (++rxQueued >= 64) flush();
+}
+
+// One wake-up of the stack per batch instead of one per frame (the driver calls it after each pass over the rings).
+void itlmt7925Eth::flush()
+{
+    if (!netif || !rxQueued) return;
+    rxQueued = 0;
     netif->flushInputQueue();
 }
 
@@ -219,6 +229,11 @@ void itlmt7925::ethLink(bool up)
     if (!eth) return;
     eth->setLink(up);
     eth->txKick();                                                         // a stalled queue drains (link down: drops) or resumes
+}
+
+void itlmt7925::ethFlush()
+{
+    if (eth) eth->flush();
 }
 
 void itlmt7925::ethTxKick()

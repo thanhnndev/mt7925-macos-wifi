@@ -42,7 +42,7 @@ struct itl_ring {
     int n = 0;
     int head = 0;          // tx: next slot to write; rx: next slot to refill
     int tail = 0;          // rx: next slot to read
-    uint16_t slotBuf[256]; // rx: which buffer sits in which slot
+    uint16_t slotBuf[1536]; // rx: which buffer sits in which slot (MT7925_RX_RING_SIZE at most)
 };
 
 class itlmt7925 : public IOService {
@@ -57,7 +57,8 @@ public:
     int  ethTx(const uint8_t *frame, uint32_t len);
     bool ethCreate();
     void ethRx(const uint8_t *frame, uint32_t len);
-    void ethTxKick();                        // TX buffers are free again (or the link changed): restart the stalled queue
+    void ethTxKick();                        // restart a stalled output queue
+    void ethFlush();                         // deliver the received batch to the stack
     // Speed shown by macOS for the interface: the estimated best PHY rate when HT/VHT is in use, else the 54 Mb/s legacy value
     static void baDeliverCb(void *ctx, const uint8_t *frame, uint32_t len);
     uint64_t linkSpeedBps() const { return fastActive ? (uint64_t)fastRate * 1000000ull : 54000000ull; }
@@ -84,9 +85,9 @@ private:
     void rmwA(uint32_t addr, uint32_t clr, uint32_t set);
     bool pollA(uint32_t addr, uint32_t mask, uint32_t val, uint32_t timeoutMs);
     void m1log(const char *fmt, ...);
-    bool dmaAlloc(itl_dma_buf &b, size_t size);
+    bool dmaAlloc(itl_dma_buf &b, size_t size, bool cached = false);
     void dmaFree(itl_dma_buf &b);
-    bool ringInit(itl_ring &r, int qid, uint32_t base, int n, bool rx);
+    bool ringInit(itl_ring &r, int qid, uint32_t base, int n, bool rx, bool cached = false);
     void ringFree(itl_ring &r);
     void dmaDisable();
     void dmaEnable();
@@ -140,6 +141,12 @@ private:
     int  m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *name);
     int  m3HwPrep();
     int  m3Bss(bool enable);
+    int  m3Clc(const char *cc, uint8_t env);   // CLC power tables from the RAM firmware for country cc
+    int  clcSend(const uint8_t *clc, const char *cc, uint8_t env, uint8_t idx);
+    int  m3TxPower();                        // per-channel rate power limits (SAR from ACPI MTDS / MTGS)
+    int  efuseRead(uint32_t off, uint8_t *val);
+    void sarInit();
+    int  powerCmd(const void *payload, size_t plen, const char *name);
     int  m3Edca();                           // per-AC contention parameters from the AP's WMM element (after every BSS_INFO)
     int  m3Sta(uint8_t state, bool newly, uint16_t aid);
     int  m3Roc(bool acquire);
@@ -167,6 +174,9 @@ private:
     uint16_t m3tok = 0, m3aid = 0;
     uint32_t m3rxOther = 0, m3fwLogged = 0;
     bool m3hw = false;
+    int8_t sarPwr[11];                       // ACPI dynamic SAR limit per mt76 SAR range (0.5 dBm), 127 none; read in m3HwPrep
+    uint8_t hwEncap = 0;                     // efuse 0xa71 bits 1:0: selects the CLC tables meant for this module
+    char clcCc[3] = {0};                     // country the CLC tables were last sent for
     // step 4: association complete -> 4-way handshake, keys, Ethernet interface, data path
     bool m3dataOn = false;                   // data frames from the AP are handled (set after association)
     bool m3wantEapol = false;

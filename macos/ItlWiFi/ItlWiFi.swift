@@ -118,74 +118,14 @@ enum LoginItem {
     }
 }
 
-// ---- speed test ------------------------------------------------------------------------------------------------------------
-// Runs /usr/bin/curl bound to the Wi-Fi interface (--interface), so a phone tether or Ethernet with a better route cannot
-// take the traffic. Server: Cloudflare's speed test endpoints (speed.cloudflare.com/__down and /__up), the same ones its web
-// test uses. Each direction runs for at most `secs` seconds; the rate is bytes moved / time, so a cut-off run still counts.
-struct SpeedResult { var pingMs: Double?; var downMbps: Double?; var upMbps: Double?; var error: String?; var at = Date() }
-
-enum SpeedTest {
-    static let host = "https://speed.cloudflare.com"
-
-    static func wifiInterface() -> String? {
-        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("itlmt7925Eth"))
-        guard svc != 0 else { return nil }
-        defer { IOObjectRelease(svc) }
-        return IORegistryEntrySearchCFProperty(svc, kIOServicePlane, "BSD Name" as CFString, kCFAllocatorDefault,
-                                               IOOptionBits(kIORegistryIterateRecursively)) as? String
-    }
-
-    // curl ... -w "<size> <time> <connect>"; returns nil when curl moved nothing
-    static func curl(_ iface: String, _ args: [String], stdin: URL? = nil) -> (bytes: Double, secs: Double, connect: Double)? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        p.arguments = ["-s", "-o", "/dev/null", "--interface", iface, "-w", "%{size_download} %{size_upload} %{time_total} %{time_connect} %{time_starttransfer}"] + args
-        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
-        if let f = stdin { p.standardInput = try? FileHandle(forReadingFrom: f) }
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()                                    // exit 28 (time limit) is expected for the transfers
-        let f = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .split(separator: " ").compactMap { Double($0) } ?? []
-        guard f.count == 5 else { return nil }
-        let bytes = max(f[0], f[1]), xfer = f[2] - f[4]      // time after the first byte, so the handshake does not count
-        return (bytes, xfer > 0.2 ? xfer : f[2], f[3])
-    }
-
-    static func run(secs: Int = 10) -> SpeedResult {
-        var r = SpeedResult(pingMs: nil, downMbps: nil, upMbps: nil, error: nil)
-        guard let iface = wifiInterface() else { r.error = "no Wi-Fi interface (is itlmt7925 connected?)"; return r }
-        // latency: TCP connect time of a few empty requests, best of them
-        let pings = (0..<4).compactMap { _ in curl(iface, ["--max-time", "3", "\(host)/__down?bytes=0"])?.connect }.filter { $0 > 0 }
-        if let best = pings.min() { r.pingMs = best * 1000 } else { r.error = "speed.cloudflare.com not reachable over \(iface)"; return r }
-        if let d = curl(iface, ["--max-time", "\(secs)", "\(host)/__down?bytes=50000000"]), d.bytes > 0 {
-            r.downMbps = d.bytes * 8 / d.secs / 1e6 }
-        // upload: a temporary file of random bytes (not compressible), streamed until the time limit
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("itlwifi-up.bin")
-        if !FileManager.default.fileExists(atPath: tmp.path) {
-            var buf = [UInt8](repeating: 0, count: 64 << 20)
-            _ = SecRandomCopyBytes(kSecRandomDefault, buf.count, &buf)
-            FileManager.default.createFile(atPath: tmp.path, contents: Data(buf))
-        }
-        if let u = curl(iface, ["--max-time", "\(secs)", "-X", "POST", "-H", "Content-Type: application/octet-stream",
-                                "--data-binary", "@\(tmp.path)", "\(host)/__up"]), u.bytes > 0 {
-            r.upMbps = u.bytes * 8 / u.secs / 1e6 }
-        if r.downMbps == nil && r.upMbps == nil { r.error = "no data moved" }
-        return r
-    }
-
-    static func fmt(_ v: Double?) -> String {
-        guard let v else { return "–" }
-        return v >= 100 ? String(format: "%.0f", v) : v >= 10 ? String(format: "%.1f", v) : String(format: "%.2f", v)
-    }
-}
-
-
 // ---- model -----------------------------------------------------------------------------------------------------------------
 @MainActor
 final class WifiModel: ObservableObject {
     @Published var st = WifiStatus()
     @Published var speed: SpeedResult?
     @Published var speedRunning = false
+    @Published var speedServer = "auto"
+    @Published var speedPath = SpeedPath.internet
     @Published var expanded: String?            // SSID whose password row is open; "" = "Other network"
     @Published var message: String?
     @Published var loginEnabled = LoginItem.enabled
@@ -258,8 +198,9 @@ final class WifiModel: ObservableObject {
     func runSpeedTest() {
         guard !speedRunning, connected else { return }
         speedRunning = true; message = nil
+        let server = speedServer, path = speedPath
         Task.detached(priority: .userInitiated) {
-            let r = SpeedTest.run()
+            let r = SpeedTest.run(serverID: server, path: path)
             await MainActor.run { self.speed = r; self.speedRunning = false; self.onChange?() }
         }
     }
@@ -354,23 +295,43 @@ struct SpeedCard: View {
         }.frame(maxWidth: .infinity)
     }
     var body: some View {
-        VStack(spacing: 8) {
-            if let r = m.speed, r.error == nil {
-                HStack { cell("Down", r.downMbps, "Mb/s"); cell("Up", r.upMbps, "Mb/s"); cell("Latency", r.pingMs, "ms") }
-            } else if let e = m.speed?.error {
-                Text(e).font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Path", selection: $m.speedPath) {
+                ForEach(SpeedPath.allCases, id: \.self) { Text($0.label).tag($0) }
+            }.disabled(m.speedRunning)
+            Picker("Server", selection: $m.speedServer) {
+                Text("Auto · fallback servers").tag("auto")
+                ForEach(SpeedTest.servers) { Text($0.name).tag($0.id) }
+            }.disabled(m.speedRunning)
+            if let r = m.speed {
+                if r.downMbps != nil || r.upMbps != nil {
+                    HStack { cell("Down", r.downMbps, "Mb/s"); cell("Up", r.upMbps, "Mb/s"); cell("TCP", r.pingMs, "ms") }
+                }
+                if let e = r.error {
+                    Text(e).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                if !r.server.isEmpty {
+                    Text(r.server + (r.remoteIP.isEmpty ? "" : " · " + r.remoteIP))
+                        .font(.system(size: 10)).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                if let note = r.note { Text(note).font(.system(size: 10)).foregroundStyle(.secondary) }
             }
             HStack {
-                if m.speedRunning { ProgressView().controlSize(.small); Text("Testing… about 25 s").font(.system(size: 11)).foregroundStyle(.secondary) }
-                else if let r = m.speed {
-                    Text("Measured " + r.at.formatted(date: .omitted, time: .shortened) + " over Wi-Fi only")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                if m.speedRunning {
+                    ProgressView().controlSize(.small)
+                    Text("Testing…").font(.system(size: 11)).foregroundStyle(.secondary)
+                } else if let r = m.speed {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text((r.downMbps == nil && r.upMbps == nil ? "Attempted " : "Measured ") + r.at.formatted(date: .omitted, time: .shortened))
+                        Text(r.path)
+                    }.font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(m.speed == nil ? "Run Speed Test" : "Run Again") { m.runSpeedTest() }
                     .controlSize(.small).disabled(m.speedRunning || !m.connected)
             }
         }
+        .font(.system(size: 11))
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
         .padding(.horizontal, 14)
@@ -553,10 +514,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-MainActor.assumeIsolated {                     // top-level code runs on the main thread
-    let app = NSApplication.shared
-    let delegate = AppDelegate()
-    app.delegate = delegate
-    app.setActivationPolicy(.accessory)
-    app.run()
+@main
+struct ItlWiFiMain {
+    static func main() {
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            let delegate = AppDelegate()
+            app.delegate = delegate
+            app.setActivationPolicy(.accessory)
+            app.run()
+        }
+    }
 }
