@@ -15,6 +15,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <pexpert/pexpert.h>
+#include <net/kpi_interface.h>
 
 #define super IO80211InfraProtocol
 OSDefineMetaClassAndStructors(itlmt7925WifiInterface, IO80211InfraProtocol)
@@ -400,6 +401,28 @@ IOReturn itlmt7925WifiInterface::disable(uint32_t options)
     return result;
 }
 
+IOReturn itlmt7925WifiInterface::getHardwareAddress(ether_addr *address)
+{
+    if (!address || !ctl) return kIOReturnBadArgument;
+    IOEthernetAddress station = {};
+    IOReturn r = ctl->getHardwareAddress(&station);
+    if (r == kIOReturnSuccess) memcpy(address, &station, 6);
+    return r;
+}
+
+IOReturn itlmt7925WifiInterface::prepareBSDInterface(__ifnet *netif, uint32_t options)
+{
+    IOReturn r = IO80211InfraProtocol::prepareBSDInterface(netif, options);
+    if (r == kIOReturnSuccess && netif && bound) {
+        IOEthernetAddress station = {};
+        IOReturn mac = ctl->getHardwareAddress(&station);
+        int address = mac == kIOReturnSuccess ? ifnet_set_lladdr(netif, &station, 6) : -1;
+        int offload = ifnet_set_offload(netif, 0);
+        itlmtTrace(ctl, "if:BSD station=%d offload=%d", address, offload);
+    }
+    return r;
+}
+
 IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t command, void *data)
 {
     bool media = command == 0xc02c6938 || command == 0xc0286938;
@@ -408,6 +431,15 @@ IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t comm
     if (firstMedia || command == 0x80206910)
         itlmtTrace(ctl, "if:bsd cmd=%x begin", command);
     IOReturn result = IO80211InfraProtocol::processBSDCommand(netif, command, data);
+    // 24H32 updateMediumStatus reads its internal state directly, bypassing
+    // linkState(). Preserve the base supported-media handling, then publish
+    // actual radio state in the shared 32/64-bit ifmediareq status field (+0x18).
+    if (media && result == kIOReturnSuccess && data && bound && rxLock) {
+        IOLockLock(rxLock);
+        uint32_t status = radioUp ? 3u : 1u; // IFM_AVALID | IFM_ACTIVE
+        IOLockUnlock(rxLock);
+        memcpy((uint8_t *)data + 0x18, &status, sizeof(status));
+    }
     // Record only media queries and interface flags; never dump ioctl payloads.
     if (firstMedia || command == 0x80206910 || (media && result != lastMediaResult[index]))
         itlmtTrace(ctl, "if:bsd cmd=%x result=%x", command, result);

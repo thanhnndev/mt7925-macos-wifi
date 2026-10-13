@@ -38,6 +38,8 @@ public:
     IOReturn enable(uint32_t options) override;
     IOReturn disable(uint32_t options) override;
     void setInterfaceEnable(bool enabled) override;
+    IOReturn prepareBSDInterface(__ifnet *, uint32_t) override;
+    IOReturn getHardwareAddress(ether_addr *) override;
     uint32_t linkState() override;
     uint32_t getHardwareAssists() override;
     IOReturn processBSDCommand(__ifnet *netif, uint32_t command, void *data) override;
