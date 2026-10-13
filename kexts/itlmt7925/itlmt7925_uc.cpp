@@ -593,6 +593,15 @@ void itlmt7925::m3Supervise()
             bool wasUp = linkUpMs != up0;
             everUp |= wasUp;
             m3log("supervisor: attempt rc=%d up=%d lost=%d (%s)", rc, wasUp ? 1 : 0, m3lost ? 1 : 0, m3res);
+            if (recoverWanted && recoverCnt < 8) {                       // the firmware stopped answering: cold start again
+                recoverWanted = false;
+                bool ok = chipRecover();
+                bootScan = true;                                         // M2 scanned: aps[] is fresh
+                wifiNets();
+                if (njState == ITL_NATIVE_UP) njState = ITL_NATIVE_IDLE;
+                if (ok) { fails = 0; nextTry = 0; wifiState(want ? "connecting" : "idle", ""); continue; }
+            }
+            recoverWanted = false;
             if (cmdPending(CMD_JOIN | CMD_DISCONNECT)) continue;          // the user changed the plan while we were connecting
             if (userNative && !wasUp) {
                 // The join the Family asked for did not work: report it once and stop; the Family decides what happens next.

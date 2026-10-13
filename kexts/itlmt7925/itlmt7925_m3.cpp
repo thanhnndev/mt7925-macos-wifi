@@ -913,9 +913,104 @@ void itlmt7925::m3Teardown()
 // ---------------------------------------------------------------------------------------------
 static inline uint16_t be16p(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 
+// One record per Ethernet frame (ring of the last kFrRing): what went through just before the firmware stopped answering.
+void itlmt7925::frameNote(char dir, const uint8_t *e, uint32_t len)
+{
+    if (len < 14) return;
+    FrameRec &f = frRing[frHead++ % kFrRing];
+    f.ms = nowMs();
+    f.len = (uint16_t)len;
+    f.dir = (uint8_t)dir;
+    f.et = (uint16_t)(e[12] << 8 | e[13]);
+    f.proto = 0;
+    f.a = f.b = 0;
+    if (f.et == 0x0806 && len >= 22) {
+        f.a = e[21];                                         // ARP operation
+    } else if (f.et == 0x0800 && len >= 34) {
+        const uint8_t *ip = e + 14;
+        uint32_t ihl = (ip[0] & 15) * 4;
+        f.proto = ip[9];
+        if ((f.proto == 17 || f.proto == 6) && len >= 14 + ihl + 4) {
+            f.a = (uint16_t)(ip[ihl] << 8 | ip[ihl + 1]);
+            f.b = (uint16_t)(ip[ihl + 2] << 8 | ip[ihl + 3]);
+        } else if (f.proto == 1 && len > 14 + ihl) {
+            f.a = ip[ihl];
+        }
+    }
+}
+
+// Everything that could explain a silent firmware, in one go (no secrets: registers, ring indices, frame kinds).
+void itlmt7925::m3Postmortem(const char *tag)
+{
+    uint8_t cap = 0;
+    uint16_t lnkCtl = 0xffff, lnkSta = 0xffff, cmd = pci->configRead16(kIOPCIConfigCommand), sta = pci->configRead16(kIOPCIConfigStatus);
+    if (pci->findPCICapability(0x10, &cap) && cap) {
+        lnkCtl = pci->configRead16(cap + 0x10);
+        lnkSta = pci->configRead16(cap + 0x12);
+    }
+    uint32_t doneEvt = 0, doneDat = 0;
+    for (int i = 0; i < rxEvt.n; i++) if (le32(rxEvt.desc.va + i * 16 + 4) & MT_DMA_CTL_DMA_DONE) doneEvt++;
+    for (int i = 0; i < rxData.n; i++) if (le32(rxData.desc.va + i * 16 + 4) & MT_DMA_CTL_DMA_DONE) doneDat++;
+    char b[700];
+    snprintf(b, sizeof(b),
+             "%s: chip=%08x lp=%08x misc=%08x dummy=%08x glo=%08x ints=%08x inte=%08x pci cmd=%04x sta=%04x lnkctl=%04x lnksta=%04x "
+             "txwm %u/%u txdat %u/%u txfwdl %u/%u rxevt %u/%u t=%d done=%u/%d rxdat %u/%u t=%d done=%u/%d fwlog=%u ev=%u",
+             tag, rdA(MT_HW_CHIPID), rdA(MT_CONN_ON_LPCTL), rdA(MT_CONN_ON_MISC), rdA(MT_WFDMA_DUMMY_CR), rdA(MT_WFDMA0_GLO_CFG),
+             rdA(MT_WFDMA0_HOST_INT_STA), rdA(MT_WFDMA0_HOST_INT_ENA), cmd, sta, lnkCtl, lnkSta, rd(txWm.regs + Q_CPU_IDX),
+             rd(txWm.regs + Q_DMA_IDX) & 0xffff, txData.n ? rd(txData.regs + Q_CPU_IDX) : 0,
+             txData.n ? rd(txData.regs + Q_DMA_IDX) & 0xffff : 0, rd(txFwdl.regs + Q_CPU_IDX), rd(txFwdl.regs + Q_DMA_IDX) & 0xffff,
+             rd(rxEvt.regs + Q_CPU_IDX), rd(rxEvt.regs + Q_DMA_IDX) & 0xffff, rxEvt.tail, doneEvt, rxEvt.n,
+             rxData.n ? rd(rxData.regs + Q_CPU_IDX) : 0, rxData.n ? rd(rxData.regs + Q_DMA_IDX) & 0xffff : 0, rxData.tail, doneDat,
+             rxData.n, fwLogCnt, evCount);
+    m3log("postmortem %s", b);
+    setProperty("wifi-postmortem", b);
+    // the last frames, newest last: "<ms ago><t|r> <ethertype>/<proto> <a>><b> <len>"
+    char fr[800];
+    size_t o = 0;
+    uint32_t now = nowMs();
+    fr[0] = 0;
+    uint32_t cnt = frHead < (uint32_t)kFrRing ? frHead : (uint32_t)kFrRing;
+    for (uint32_t i = 0; i < cnt; i++) {
+        const FrameRec &f = frRing[(frHead - cnt + i) % kFrRing];     // oldest first
+        int n = snprintf(fr + o, sizeof(fr) - o, "%u%c %04x/%u %u>%u %u;", now - f.ms, f.dir, f.et, f.proto, f.a, f.b, f.len);
+        if (n <= 0 || o + (size_t)n >= sizeof(fr)) break;
+        o += (size_t)n;
+    }
+    setProperty("wifi-frames", fr);
+}
+
+// Redo what a cold start does (wfsys reset, rings, firmware, interface, first scan). Runs on the worker thread only.
+bool itlmt7925::chipRecover()
+{
+    recoverCnt++;
+    evLog("chip not answering: reset and firmware reload #%u", recoverCnt);
+    m3log("recover #%u: wfsys reset, rings, firmware", recoverCnt);
+    m3linkUp = false;
+    m3dataOn = false;
+    m3cipher = 0;
+    ethStalled = false;
+    fastActive = false;
+    txPool = false;
+    txClrAll();
+    ringFree(txWm);
+    ringFree(txFwdl);
+    ringFree(rxEvt);
+    ringFree(rxData);
+    ringFree(txData);
+    int rc = m1Run();
+    m3log("recover: M1 rc=%d", rc);
+    if (!rc) {
+        rc = m2Run();
+        m3log("recover: M2 rc=%d", rc);
+    }
+    evLog("recover #%u rc=%d", recoverCnt, rc);
+    return rc == 0;
+}
+
 // First few interesting packets (ARP, UDP incl. DHCP, ICMP) in either direction, to see how far traffic gets.
 void itlmt7925::m3Note(const char *dir, const uint8_t *e, uint32_t len)
 {
+    frameNote(dir[0], e, len);
     if (stNote >= 24 || len < 34) return;
     uint16_t et = be16p(e + 12);
     if (et == 0x0806) {
@@ -1285,7 +1380,7 @@ void itlmt7925::m3Link()
     // must already be ready before entering the Family link transition.
     if (nativeMode) ethLink(true);
     evLog("up lvl %u ch %u bw %u", lvl, tgtCh, fastActive ? fastBw : 0);
-    bool watchdogDone = false;
+    bool watchdogDone = false, silenceDone = false;
     for (;;) {
         int act = m3PumpOnce();
         uint32_t now = nowMs();
@@ -1300,6 +1395,16 @@ void itlmt7925::m3Link()
             m3Teardown();
             return;
         }
+        if (!silenceDone && tgtLastBcnMs && now - tgtLastBcnMs > 4000 && now - lastRxDataMs > 4000) {
+            // No beacon for 4 s (the AP sends ten a second): snapshot, then take driver ownership again in case the firmware
+            // went to sleep on its own, and snapshot once more to see whether that changed anything.
+            silenceDone = true;
+            m3Postmortem("silent 4s");
+            bool own = driverOwn();
+            evLog("silent for 4 s: driverOwn=%d", own ? 1 : 0);
+            IOSleep(50);
+            m3Postmortem("after driverOwn");
+        }
         if (!m3lost && tgtLastBcnMs && now - tgtLastBcnMs > 15000 && now - lastRxDataMs > 15000) {
             snprintf(m3lostWhy, sizeof(m3lostWhy), "no beacon or data from the AP for 15 s");
             m3lost = true;
@@ -1307,6 +1412,8 @@ void itlmt7925::m3Link()
         if (m3lost) {
             m3log("link lost: %s", m3lostWhy);
             evLog("lost after %us at lvl %u: %s", (now - t0) / 1000, lvl, m3lostWhy);
+            m3Postmortem("lost");
+            recoverWanted = true;                            // the supervisor resets the chip once the link state is torn down
             m3Teardown();
             return;
         }

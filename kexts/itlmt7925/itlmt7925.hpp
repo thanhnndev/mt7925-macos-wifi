@@ -202,6 +202,17 @@ private:
     bool m3TxData(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, uint32_t plen, bool protect,
                   bool *full = nullptr);
     void m3Note(const char *dir, const uint8_t *eth, uint32_t len);
+    // Post-mortem: the last Ethernet frames in either direction and one line of chip / ring / PCIe state, published as the
+    // properties "wifi-frames" and "wifi-postmortem" when the firmware stops answering. chipRecover() redoes M1 + M2.
+    struct FrameRec { uint32_t ms; uint16_t len, et, a, b; uint8_t dir, proto; };
+    static const int kFrRing = 24;
+    FrameRec frRing[kFrRing] = {};
+    uint32_t frHead = 0;
+    bool recoverWanted = false;
+    uint32_t recoverCnt = 0;
+    void frameNote(char dir, const uint8_t *eth, uint32_t len);
+    void m3Postmortem(const char *tag);
+    bool chipRecover();
     void m3Link();
     void nvramStat(const char *msg);
     bool m3Tx(const uint8_t *frame, uint32_t len, uint8_t type, uint8_t subtype, bool protect = false)

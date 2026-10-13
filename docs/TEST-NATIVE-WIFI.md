@@ -427,3 +427,24 @@ Both kexts build; `check_kext_links.py` only the 6 baseline-missing symbols; `ch
   other group addresses; never call them otherwise (the call itself is the flag).
 * Expected next boot: `ping` to the gateway answers, DNS/TCP work. The default route may still prefer the en1 tether service;
   if browsing keeps using en1, reorder Network service order (not a driver problem).
+
+## Result of round 17 (2026-10-13): unicast works, firmware stops answering ~50 s after link-up
+
+Round 17 (`595561c`) booted. Unicast IPv4 reaches the stack (ping to the gateway, DNS). New failure: about 35 s after
+link-up the radio goes silent (no beacons, no data), 15 s later the core logs `link lost: no beacon or data from the AP for
+15 s`, and every MCU command after that returns `rc=-110` (`bss_info(add)`, `edca`), scans find nothing. The chip stays dead
+until reboot. Cause: chưa xác định (candidates: firmware power management, a specific TX/RX frame, DMA / MCU queue stall,
+PCIe link state).
+
+Round 18 adds diagnostics and recovery in the core (`itlmt7925`), so one boot gives a verdict:
+
+- `wifi-frames` (ioreg property of the core): last 24 Ethernet frames, oldest first, `<ms ago><t|r> <ethertype>/<ip proto> <a>><b> <len>`
+  (ports for UDP/TCP, ICMP type or ARP op in `a`).
+- `wifi-postmortem`: chip id, LPCTL / MISC / DUMMY / GLO_CFG / HOST_INT status+enable, PCI command / status / link control /
+  link status, CPU/DMA indices of every ring, count of descriptors marked done. Written at 4 s without beacon ("silent 4s"),
+  again after a `driverOwn()` wake attempt ("after driverOwn") and when the link is declared lost ("lost").
+- Recovery: after a lost link the supervisor redoes the cold start (`wfsys` reset, rings, firmware, interface, scan) via
+  `chipRecover()` (at most 8 times per boot) and rejoins. `wifi-events` shows `chip not answering: reset and firmware reload #n`
+  and `recover #n rc=...`.
+
+Read after the reboot (no root needed): `ioreg -l -w0 | grep -E "wifi-postmortem|wifi-frames|wifi-events"`.
