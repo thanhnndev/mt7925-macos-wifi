@@ -82,6 +82,17 @@ public:
 private:
     void drainDatapath();
     bool linkUp();
+    // scan / join (stage 3): requests are handed to the core through ITL_NATIVE_*; results are posted from the datapath tick
+    void pollControl();
+    void deliverScanResults();
+    void finishJoin(const ItlNativeStatus &st, bool ok);
+    void postEvent(uint32_t code, void *data, size_t length);
+    bool queryStatus(ItlNativeStatus *st);
+    ItlNativeAp *snap = nullptr;            // ITL_NATIVE_AP_MAX entries: scratch for ITL_NATIVE_NETS (tick thread only)
+    bool scanActive = false, scanImmediate = false, joinActive = false;
+    uint32_t scanGenAtReq = 0, scanTicks = 0, joinSeq = 0, joinTicks = 0, controlTicks = 0, scanTraced = 0;
+    uint8_t scanSsidLen = 0;
+    char scanSsid[32] = {};
     uint64_t osFeatureFlags = 0;            // setOS_FEATURE_FLAGS payload (qword at +0), kept as Apple's core does
     IOService *core = nullptr;
     IOTimerEventSource *dpTimer = nullptr;

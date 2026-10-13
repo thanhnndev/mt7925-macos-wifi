@@ -241,10 +241,127 @@ void itlmt7925::wifiNets()
 
 void itlmt7925::wifiScan()
 {
+    __atomic_store_n(&scanBusy, 1, __ATOMIC_RELEASE);
     wifiState("scanning", nullptr);
     m2Scan(nullptr);
     scanGen++;
     wifiNets();
+    __atomic_store_n(&scanBusy, 0, __ATOMIC_RELEASE);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// Native Wi-Fi control (platform functions of itlmt7925_eth.cpp, called by the interface of itlmt7925Native)
+// ---------------------------------------------------------------------------------------------------------------------------
+IOReturn itlmt7925::nativeScanReq(uint32_t *started)
+{
+    *started = 0;
+    if (!m3On || !cmdLock || !wstate[0]) return kIOReturnNotReady;
+    IOLockLock(cmdLock);
+    uint32_t now = nowMs();
+    if ((cmdBits & CMD_SCAN) || __atomic_load_n(&scanBusy, __ATOMIC_ACQUIRE)) *started = 1;      // join the queued / running scan
+    else if (lastScanReqMs && now - lastScanReqMs < 10000) *started = 0;                          // cache is current: caller delivers it
+    else {
+        lastScanReqMs = now ? now : 1;
+        cmdBits |= CMD_SCAN;
+        __atomic_store_n(&scanBusy, 1, __ATOMIC_RELEASE);
+        *started = 1;
+    }
+    IOLockUnlock(cmdLock);
+    return kIOReturnSuccess;
+}
+
+IOReturn itlmt7925::nativeJoin(const ItlNativeJoin *j)
+{
+    if (!m3On || !cmdLock || !wstate[0]) return kIOReturnNotReady;
+    if (!j || j->version != 1 || !j->ssidLen || j->ssidLen > 32) return kIOReturnBadArgument;
+    IOLockLock(cmdLock);
+    bzero(&reqNet, sizeof(reqNet));
+    memcpy(reqNet.ssid, j->ssid, j->ssidLen);
+    memcpy(reqNet.pmk, j->pmk, sizeof(reqNet.pmk));
+    reqNet.hasPmk = true;
+    reqNet.native = true;
+    njFail = 0;
+    njState = ITL_NATIVE_CONNECTING;
+    njSeq++;
+    cmdBits = (cmdBits & ~(uint32_t)CMD_DISCONNECT) | (uint32_t)CMD_JOIN;
+    IOLockUnlock(cmdLock);
+    return kIOReturnSuccess;
+}
+
+// Whole elements only, at most `max` bytes.
+static uint16_t ieWhole(const uint8_t *ie, uint32_t len, uint32_t max)
+{
+    uint32_t n = 0;
+    while (n + 2 <= len && n + 2 + ie[n + 1] <= len && n + 2 + ie[n + 1] <= max) n += 2 + ie[n + 1];
+    return (uint16_t)n;
+}
+
+static uint32_t failCode(const char *stage)
+{
+    if (!strncmp(stage, "nocred", 6)) return 1;
+    if (!strncmp(stage, "scan", 4)) return 2;
+    if (!strncmp(stage, "roc-fail", 8)) return 3;
+    if (!strncmp(stage, "auth-fail", 9)) return 4;
+    if (!strncmp(stage, "assoc-fail", 10)) return 5;
+    if (!strncmp(stage, "hs-fail", 7)) return 6;
+    return 7;
+}
+
+void itlmt7925::nativeStatus(ItlNativeStatus *s)
+{
+    bzero(s, sizeof(*s));
+    s->version = 1;
+    uint32_t st = njState;
+    // a join in progress hides an old link that is still being torn down
+    s->state = st == ITL_NATIVE_CONNECTING ? ITL_NATIVE_CONNECTING
+             : m3linkUp ? ITL_NATIVE_UP
+             : st == ITL_NATIVE_FAILED ? ITL_NATIVE_FAILED : ITL_NATIVE_IDLE;
+    s->joinSeq = njSeq;
+    s->failStage = njFail;
+    s->scanGen = scanGen;
+    s->scanBusy = __atomic_load_n(&scanBusy, __ATOMIC_ACQUIRE);
+    memcpy(s->bssid, tgtBssid, 6);
+    s->channel = tgtCh;
+    s->rssi = tgtRssi;
+    s->rateMbps = fastActive ? fastRate : 54;
+    size_t n = strnlen(m3ssid, 32);
+    memcpy(s->ssid, m3ssid, n);
+    s->ssidLen = (uint8_t)n;
+    s->capability = tgtCap;
+    s->beaconInterval = tgtBcnInt;
+    uint32_t il = tgtIeLen < sizeof(tgtIe) ? tgtIeLen : (uint32_t)sizeof(tgtIe);
+    s->ieLen = ieWhole(tgtIe, il, ITL_NATIVE_IE_MAX);
+    memcpy(s->ie, tgtIe, s->ieLen);
+}
+
+void itlmt7925::nativeNets(ItlNativeNets *out)
+{
+    out->version = 1;
+    out->count = 0;
+    out->scanGen = scanGen;
+    out->scanBusy = __atomic_load_n(&scanBusy, __ATOMIC_ACQUIRE);
+    if (!out->aps) return;
+    uint32_t now = nowMs();
+    int total = nAps;
+    for (int i = 0; i < total && out->count < out->max && i < ITL_NATIVE_AP_MAX; i++) {
+        const itl_ap &a = aps[i];
+        ItlNativeAp &o = out->aps[out->count];
+        bzero(&o, sizeof(o));
+        memcpy(o.bssid, a.bssid, 6);
+        o.channel = a.ch;
+        o.security = a.sec;
+        o.rssi = a.rssi;
+        size_t n = strnlen(a.ssid, 32);
+        memcpy(o.ssid, a.ssid, n);
+        o.ssidLen = (uint8_t)n;
+        o.probeResponse = a.probe;
+        o.capability = a.cap;
+        o.beaconInterval = a.bcnInt;
+        o.ieLen = a.ieLen <= ITL_NATIVE_IE_MAX ? a.ieLen : 0;
+        memcpy(o.ie, a.ie, o.ieLen);
+        o.ageMs = now - a.seenMs;
+        out->count++;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------
@@ -359,6 +476,13 @@ void itlmt7925::apSeen(const uint8_t *p, uint32_t len, uint32_t off, const char 
     if (rssi) a.rssi = a.rssi ? (int8_t)((a.rssi + rssi) / 2) : rssi;
     a.sec = secFromIes(f + 36, p + len, (uint16_t)(f[34] | (f[35] << 8)));
     a.seenMs = now;
+    a.probe = f[0] == 0x50;                                                  // probe response (a beacon is 0x80)
+    a.bcnInt = (uint16_t)(f[32] | (f[33] << 8));
+    a.cap = (uint16_t)(f[34] | (f[35] << 8));
+    const uint8_t *ies = f + 36, *iend = p + len;
+    uint16_t il = iend > ies ? ieWhole(ies, (uint32_t)(iend - ies), ITL_NATIVE_IE_MAX) : 0;
+    memcpy(a.ie, ies, il);
+    a.ieLen = il;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------
@@ -406,6 +530,7 @@ void itlmt7925::m3Supervise()
     int nb = loadPlistNets(boot, 4);
     Net user = {};
     bool haveUser = false, want = nb > 0, everUp = false, away = false, bootScan = true;   // aps[] holds the M2 boot scan
+    bool userNative = false;                                 // the current `user` network was asked for by the Family (ITL_NATIVE_JOIN)
     uint32_t fails = 0, nextTry = 0, lastProbeAll = nowMs();
     wifiNets();                                              // the boot scan (M2) already filled aps[]
     wifiState(want ? "connecting" : "idle", "");
@@ -414,14 +539,16 @@ void itlmt7925::m3Supervise()
         Net j;
         uint32_t c = cmdTake(CMD_SCAN | CMD_JOIN | CMD_DISCONNECT, &j);
         if (c & CMD_DISCONNECT) {
-            want = false; haveUser = false; fails = 0; away = false;
+            want = false; haveUser = false; fails = 0; away = false; userNative = false;
             bzero(&user, sizeof(user));
+            if (njState != ITL_NATIVE_FAILED) njState = ITL_NATIVE_IDLE;
             m3log("supervisor: disconnect");
             wifiState("idle", "");
         }
         if (c & CMD_JOIN) {
             if (strcmp(user.ssid, j.ssid) != 0) lvlCap = 255;      // another network: its own ladder
             user = j;
+            userNative = j.native;
             haveUser = true; want = true; everUp = false; fails = 0; nextTry = 0; away = false;
             m3log("supervisor: join ssid len=%u", (unsigned)strlen(user.ssid));
         }
@@ -467,6 +594,19 @@ void itlmt7925::m3Supervise()
             everUp |= wasUp;
             m3log("supervisor: attempt rc=%d up=%d lost=%d (%s)", rc, wasUp ? 1 : 0, m3lost ? 1 : 0, m3res);
             if (cmdPending(CMD_JOIN | CMD_DISCONNECT)) continue;          // the user changed the plan while we were connecting
+            if (userNative && !wasUp) {
+                // The join the Family asked for did not work: report it once and stop; the Family decides what happens next.
+                njFail = failCode(m3res);
+                njState = ITL_NATIVE_FAILED;
+                userNative = false; haveUser = false; want = nb > 0; fails = 0; away = false;
+                bzero(&user, sizeof(user));
+                wifiState("failed", failText(m3res));
+                evLog("native join failed: %s", failText(m3res));
+                m3log("supervisor: native join failed (%s)", m3res);
+                nextTry = nowMs() + 5000;
+                continue;
+            }
+            if (njState == ITL_NATIVE_UP && !m3linkUp) njState = ITL_NATIVE_IDLE;   // link went away; a reconnect needs no new join
             if (wasUp) fails = 0;
             fails++;
             static const uint32_t backoff[5] = { 1000, 3000, 5000, 10000, 30000 };

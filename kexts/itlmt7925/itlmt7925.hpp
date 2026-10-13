@@ -133,7 +133,9 @@ private:
     uint32_t rxPkts = 0, rxBeacons = 0, rxOther = 0, rxDump = 0;
     uint32_t evCount = 0;
     // sec: ITL_SEC_* (itlmt7925_uc.cpp); rssi in dBm, 0 = not measured; seenMs = nowMs() of the last beacon / probe response
-    struct itl_ap { uint8_t bssid[6]; uint8_t ch; char ssid[33]; int8_t rssi; uint8_t sec; uint32_t seenMs; } aps[48];
+    // cap / bcnInt / ie / probe: the frame as heard (native Wi-Fi hands them to the Family as the scan result's beacon message)
+    struct itl_ap { uint8_t bssid[6]; uint8_t ch; char ssid[33]; int8_t rssi; uint8_t sec; uint32_t seenMs;
+                    uint8_t probe; uint16_t cap, bcnInt, ieLen; uint8_t ie[ITL_NATIVE_IE_MAX]; } aps[ITL_NATIVE_AP_MAX];
     int nAps = 0;
     uint8_t mcuSeq = 0;
     // M3 (boot-arg itlmt_m3=1, implies M2): associate to the configured network, WPA2-PSK, Ethernet interface
@@ -327,7 +329,8 @@ private:
 
     // ---- runtime control: command mailbox, supervisor loop, status for the menu bar app (itlmt7925_uc.cpp) ----
     enum { CMD_SCAN = 1, CMD_JOIN = 2, CMD_DISCONNECT = 4 };
-    struct Net { char ssid[33]; char psk[72]; };
+    // hasPmk: `pmk` is the ready pairwise master key (native Wi-Fi: userland's supplicant derived it), psk is empty then
+    struct Net { char ssid[33]; char psk[72]; bool hasPmk; bool native; uint8_t pmk[32]; };
     IOLock *cmdLock = nullptr;
     volatile uint32_t cmdBits = 0;
     Net reqNet = {};                         // the network of the last join command (under cmdLock)
@@ -347,6 +350,13 @@ private:
     int8_t rxRssi(const uint8_t *p, uint32_t len, uint32_t hdrOff);
     char wstate[16] = {0};
     uint32_t scanGen = 0;
+    volatile uint32_t scanBusy = 0;          // a scan is queued (CMD_SCAN) or running (native Wi-Fi reads it through ITL_NATIVE_NETS)
+    // native Wi-Fi join bookkeeping, read by ITL_NATIVE_STATUS: njState is ITL_NATIVE_*, njSeq counts joins, njFail a stage code
+    volatile uint32_t njState = 0, njSeq = 0, njFail = 0;
+    IOReturn nativeScanReq(uint32_t *started);
+    IOReturn nativeJoin(const struct ItlNativeJoin *j);
+    void nativeStatus(struct ItlNativeStatus *s);
+    void nativeNets(struct ItlNativeNets *n);
     volatile bool m3lost = false;            // the AP sent deauthentication / disassociation, or went silent
     char m3lostWhy[48] = {0};
     char evbuf[1500] = {0};                  // wifi-events: the last link events of this boot, one per line, oldest first

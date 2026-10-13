@@ -815,9 +815,10 @@ int itlmt7925::m3Run1()
     m3log("target %02x:%02x:%02x:%02x:%02x:%02x ch=%u cap=%04x bi=%u ies=%u", tgtBssid[0], tgtBssid[1], tgtBssid[2],
           tgtBssid[3], tgtBssid[4], tgtBssid[5], tgtCh, tgtCap, tgtBcnInt, tgtIeLen);
 
-    // PMK now (4096 PBKDF2 iterations), kept for the 4-way handshake
+    // PMK now (4096 PBKDF2 iterations), kept for the 4-way handshake; native Wi-Fi hands over the key its supplicant derived
     uint8_t pmk[32];
-    itl_wpa_pmk(m3psk, (const uint8_t *)m3ssid, strlen(m3ssid), pmk);
+    if (nets[sel].hasPmk) memcpy(pmk, nets[sel].pmk, sizeof(pmk));
+    else itl_wpa_pmk(m3psk, (const uint8_t *)m3ssid, strlen(m3ssid), pmk);
     memcpy(m3pmk, pmk, sizeof(m3pmk));
     bzero(pmk, sizeof(pmk));
     m3log("pmk ready");
@@ -1279,6 +1280,7 @@ void itlmt7925::m3Link()
     tgtRssi = 0;
     wifiState("connected", "");
     wifiLink();
+    if (njState == ITL_NATIVE_CONNECTING) njState = ITL_NATIVE_UP;   // the join the Family asked for (before its link callback)
     // Native publication may wake DHCP immediately. Radio TX/session state
     // must already be ready before entering the Family link transition.
     if (nativeMode) ethLink(true);

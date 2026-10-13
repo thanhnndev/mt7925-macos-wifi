@@ -276,6 +276,34 @@ IOReturn itlmt7925::callPlatformFunction(const OSSymbol *name, bool wait, void *
         tx->result = ethTx(tx->bytes, tx->length); // hardware copies into its own staging buffer
         return kIOReturnSuccess;
     }
+    // scan / join control: the interface's handlers run on the Family's queue; each of these only touches the mailbox / snapshots
+    if (name->isEqualTo(ITL_NATIVE_SCAN)) {
+        ItlNativeScan *s = (ItlNativeScan *)p1;
+        if (!nativeMode || !s || s->version != 1) return kIOReturnBadArgument;
+        return nativeScanReq(&s->started);
+    }
+    if (name->isEqualTo(ITL_NATIVE_NETS)) {
+        ItlNativeNets *n = (ItlNativeNets *)p1;
+        if (!nativeMode || !n || n->version != 1 || !n->aps || !n->max) return kIOReturnBadArgument;
+        nativeNets(n);
+        return kIOReturnSuccess;
+    }
+    if (name->isEqualTo(ITL_NATIVE_STATUS)) {
+        ItlNativeStatus *s = (ItlNativeStatus *)p1;
+        if (!nativeMode || !s) return kIOReturnBadArgument;
+        nativeStatus(s);
+        return kIOReturnSuccess;
+    }
+    if (name->isEqualTo(ITL_NATIVE_JOIN)) {
+        if (!nativeMode) return kIOReturnNotReady;
+        return nativeJoin((const ItlNativeJoin *)p1);
+    }
+    if (name->isEqualTo(ITL_NATIVE_LEAVE)) {
+        if (!nativeMode) return kIOReturnNotReady;
+        IOReturn r = ucDisconnect();
+        if (r == kIOReturnSuccess) njState = ITL_NATIVE_IDLE;
+        return r;
+    }
     if (name->isEqualTo(ITL_NATIVE_BIND)) {
         ItlNativeSink *sink = (ItlNativeSink *)p1;
         if (!nativeMode || !nativeLock) return kIOReturnNotReady;

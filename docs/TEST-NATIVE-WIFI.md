@@ -304,3 +304,46 @@ interface 215/0, controller 23/0; `gen_native_iface.py --check` ok.
 2. `unit:assigned t=..s fb=0` (shim) / `unit:none after 45s` + `fb=1` (shim did not match; send the `first` snapshot).
 3. `itlmt_native_calls`: which `I:` ids remain refused, which `S:` slots (467+) are reached next.
 4. `ifconfig` for the BSD name chosen by IONetworkStack (not necessarily en9).
+
+### Result of the f6b7162 boot (user report)
+
+The shim matched: the interface came up as `en4` (Wi-Fi hardware port) and the Wi-Fi switch in System Settings turns on and off.
+Scan and join were still refused at that point; the section below is the next build.
+
+## Scan + WPA2-PSK join through the native path — 2026-10-13, build after f6b7162 (not hardware-tested)
+
+### What is new
+
+Core (`itlmt7925`, `itl_native_bridge.h`): platform functions `itlmt-native-scan-v1`, `-nets-v1`, `-join-v1`, `-leave-v1`,
+`-status-v1` (only answered in native mode; they only touch a mailbox and snapshots, nothing blocks on the chip).
+The AP table now keeps probe/beacon flag, capability, beacon interval and up to 512 bytes of whole information elements.
+`Net` gained a PMK: when userland supplies the 32-byte PMK the core's M3 handshake uses it directly (`itl_wpa_pmk` is skipped).
+A failed native attempt is reported once (state FAILED, fail stage) and the network is dropped instead of being retried forever.
+
+Interface (`itlmt7925Native`): handlers for ioctl 0x1b / 0xfe (supported channels: the 12 channels the core scans), 0x1b9
+(SCAN_REQ), 0x1b3 (SCAN_ABORT), 0x1ba (ASSOCIATE: needs a raw 32-byte PMK, cipher type 6 or 9, otherwise Unsupported), 0x1b6
+(JOIN_ABORT), 0x1a9 (LEAVE_NETWORK), 0x1b1 (WCL_BSS_INFO). `getCHANNEL/RATE/RSSI/OP_MODE` answer from the core status while linked.
+`pollControl()` (100 ms inside the datapath tick) delivers results: scan table as one 0xc9 event per AP (beacon message 0x40 + IE
+length) followed by 0xed (scan done); join as 0x4e, 0xd3 and, on success, 0xd5, posted with
+`IO80211Controller::postMessage`. Scan timeout 25 s, join timeout 45 s (then LEAVE and a failure result).
+
+### Not determined (chưa xác định)
+
+`apple80211_channels_info` layout; Apple's numeric failure codes (ieee status 1 / status1 1 are placeholders); the 0xd3 flag byte and
+the words at +0xc/+0x10; whether the Family needs a current-BSS object / SSID property update before Settings shows the joined name;
+directed scans (the SSID is only a report filter); open, SAE and enterprise joins (refused with Unsupported); ROAM_PROFILE,
+BTCOEX_PROFILE, LOCALE layouts. The station address is still the placeholder shared by core and controller (core firmware setup uses
+the same value in native mode).
+
+### Checks (host-only)
+
+Both kexts build; `check_kext_links.py` only the 6 baseline-missing symbols (postMessage resolves in IO80211Family);
+`check_native_slots.py` 215 on the right slot, 0 wrong; `gen_native_iface.py --check` ok.
+
+### One reboot, read in this order
+
+1. Settings → Wi-Fi: does the list of networks appear? `bash scripts/native-wifi-test.sh logs`.
+2. `itlmt_native_calls`: `S:594` (SCAN_REQ), `P:201`/`P:237` (0xc9/0xed posted), then `S:595` (ASSOCIATE), `P:78`/`P:211`/`P:213`
+   (0x4e/0xd3/0xd5).
+3. `itlmt_native_trace`: `scan:` and `assoc:` lines (fail stage when a join fails), `wifi-events` in the core log.
+4. Join a WPA2-PSK network from Settings; `ifconfig` for the BSD interface and DHCP.

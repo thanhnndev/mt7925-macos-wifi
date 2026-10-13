@@ -130,3 +130,7 @@ large; commit the distilled tables.
   `UP,RUNNING` and a direct BSD lookup says IEEE80211. The controller refuses ioctl 12 (CARD_CAPABILITIES), which Apple's library asks
   right after DRIVER_VERSION when binding; the build after 3b4ff24 answers it with the unconditional subset of Apple's capability bits.
   Hypothesis, untested on hardware. Details: [TEST-NATIVE-WIFI.md](TEST-NATIVE-WIFI.md) "CARD_CAPABILITIES (ioctl 12)".
+
+* 2026-10-13 (Mac, f6b7162 boot): the IOSkywalkLegacyEthernet shim assigned the unit; the interface is a Wi-Fi hardware port and the
+  Wi-Fi power switch works. Milestones 4 and 5 (scan, WPA2-PSK join with a userland-supplied PMK, status getters) are written and
+  host-checked, not yet booted: [TEST-NATIVE-WIFI.md](TEST-NATIVE-WIFI.md) "Scan + WPA2-PSK join through the native path".

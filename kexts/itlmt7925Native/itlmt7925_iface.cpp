@@ -19,6 +19,13 @@
 #define super IO80211InfraProtocol
 OSDefineMetaClassAndStructors(itlmt7925WifiInterface, IO80211InfraProtocol)
 
+// IO80211Controller::postMessage(IO80211SkywalkInterface *, uint32_t code, void *data, unsigned long length, bool): what Apple's
+// AppleBCMWLANCore calls for every event it sends to userland (0xffffff800222b340 in 24H32; non-virtual, hands the event to the
+// controller's post office). Declared by symbol: the generated Family header keeps only the slot-exact virtuals.
+extern "C" IOReturn itlmtPostMessage(IO80211Controller *controller, IO80211SkywalkInterface *iface, uint32_t code, void *data,
+                                     unsigned long length, bool flag)
+    __asm__("__ZN17IO80211Controller11postMessageEP23IO80211SkywalkInterfacejPvmb");   // assembler name: leading '_' + Itanium name
+
 namespace {
 
 // Sizes Apple's PCIe layer uses with its state words at 0 (ABI-2 section 2): TxSubmission/TxCompletion `a`, RxSubmission/
@@ -337,8 +344,9 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
     if (PE_parse_boot_argn("itlmt_native_dp", &dp, sizeof(dp)) && dp) {
         core = controller->getProvider();
         rxRing = (RxFrame *)IOMalloc(sizeof(RxFrame) * 64);
+        snap = (ItlNativeAp *)IOMalloc(sizeof(ItlNativeAp) * ITL_NATIVE_AP_MAX);
         dpTimer = IOTimerEventSource::timerEventSource(this, datapathTick);
-        if (!core || !rxRing || !dpTimer || queued->addEventSource(dpTimer) != kIOReturnSuccess) {
+        if (!core || !rxRing || !snap || !dpTimer || queued->addEventSource(dpTimer) != kIOReturnSuccess) {
             itlmtTrace(ctl, "dp:timer/ring setup failed");
             destroyPoolAndQueues();
             return false;
@@ -401,6 +409,8 @@ void itlmt7925WifiInterface::destroyPoolAndQueues()
         memmove(pendingTx, pendingTx + 1, (--pendingCount) * sizeof(pendingTx[0]));
     }
     if (rxRing) { IOFree(rxRing, sizeof(RxFrame) * 64); rxRing = nullptr; }
+    if (snap) { IOFree(snap, sizeof(ItlNativeAp) * ITL_NATIVE_AP_MAX); snap = nullptr; }
+    scanActive = joinActive = false;
     core = nullptr;
     IOSkywalkPacketQueue *all[kNumTx + 2];
     uint32_t n = 0;
@@ -792,6 +802,7 @@ void itlmt7925WifiInterface::drainDatapath()
         setProperty("itlmt_tx_pending", (uint64_t)pendingCount, 32);
         setProperty("itlmt_tx_checksum_failed", (uint64_t)txChecksumFailures, 64);
     }
+    pollControl();
     dpTimer->setTimeoutMS(10);
 }
 
@@ -820,11 +831,20 @@ bool itlmt7925WifiInterface::linkUp()
     return up;
 }
 
+// apple80211_channel_data: u32 version at +0, then an apple80211_channel {version, channel, flags} at +4
+// (AppleBCMWLANCore::getCHANNEL 0xffffff80015f1506 passes data+4 to IO80211BssManager::getCurrentChannel / ChanSpecConvToApple80211Channel).
+// Flags are the 20 MHz base channel: band bit (0x8 2.4 GHz, 0x10 5 GHz) | 0x2 (20 MHz).
 IOReturn itlmt7925WifiInterface::getCHANNEL(apple80211_channel_data *d)
 {
     itlmtCall(ctl, 'S', 467);
     if (!d) return kIOReturnBadArgument;
-    return linkUp() ? kIOReturnUnsupported : kNoChannel;
+    ItlNativeStatus st;
+    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP || !st.channel) return kNoChannel;
+    store<uint32_t>(d, 0, 1);
+    store<uint32_t>(d, 4, 1);
+    store<uint32_t>(d, 8, st.channel);
+    store<uint32_t>(d, 0xc, (st.channel > 14 ? 0x10u : 0x8u) | 0x2u);
+    return kIOReturnSuccess;
 }
 
 // 0xffffff80015f2550: [data+4] = stored power-save mode. Power save is never configured here, so 0.
@@ -836,29 +856,46 @@ IOReturn itlmt7925WifiInterface::getPOWERSAVE(apple80211_powersave_data *d)
     return kIOReturnSuccess;
 }
 
+// 0xffffff80015f23aa: [data+8] = current rate in Mb/s (the core's value is kb/s, divided by 1000); not associated -> 0xe0822403.
 IOReturn itlmt7925WifiInterface::getRATE(apple80211_rate_data *d)
 {
     itlmtCall(ctl, 'S', 470);
     if (!d) return kIOReturnBadArgument;
-    return linkUp() ? kIOReturnUnsupported : kNotAssociated;
+    ItlNativeStatus st;
+    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP) return kNotAssociated;
+    store<uint32_t>(d, 8, st.rateMbps);
+    return kIOReturnSuccess;
 }
 
-// 0xffffff80015f2088: qword at +0 = 1 (version 1, mode word 0), then +4 |= mode bits of the BSS manager when associated.
-// No mode bit is set while not associated and no virtual interface exists.
+// 0xffffff80015f2088: qword at +0 = 1 (version 1, mode word 0), then +4 |= mode bits of the BSS manager when associated
+// (apple80211 mode bit 0x2 = station).
 IOReturn itlmt7925WifiInterface::getOP_MODE(apple80211_opmode_data *d)
 {
     itlmtCall(ctl, 'S', 471);
     if (!d) return (IOReturn)0x16;
+    ItlNativeStatus st;
+    bool assoc = linkUp() && queryStatus(&st) && st.state == ITL_NATIVE_UP;
     store<uint32_t>(d, 0, 1);
-    store<uint32_t>(d, 4, 0);
-    return linkUp() ? kIOReturnUnsupported : kIOReturnSuccess;
+    store<uint32_t>(d, 4, assoc ? 2u : 0u);
+    return kIOReturnSuccess;
 }
 
+// 0xffffff80015f21fa: associated -> 0x30 bytes at +4 cleared, [+0] = 1, per-chain RSSI (four dwords) at +0xc, number of chains with
+// a value at +4, their average at +0x1c; not associated -> 0xe0822403. The core reports one combined value: chain 0, one chain.
 IOReturn itlmt7925WifiInterface::getRSSI(apple80211_rssi_data *d)
 {
     itlmtCall(ctl, 'S', 472);
     if (!d) return kIOReturnBadArgument;
-    return linkUp() ? kIOReturnUnsupported : kNotAssociated;
+    ItlNativeStatus st;
+    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP) return kNotAssociated;
+    bzero((uint8_t *)d + 4, 0x30);
+    store<uint32_t>(d, 0, 1);
+    if (st.rssi) {
+        store<int32_t>(d, 0xc, st.rssi);
+        store<int32_t>(d, 0x1c, st.rssi);
+        store<uint32_t>(d, 4, 1);
+    }
+    return kIOReturnSuccess;
 }
 
 // Apple's handler (0xffffff8001610836) forwards the notification to firmware iovars (asym_mit_ext_usb[_chg]) and returns 0 for
@@ -883,6 +920,286 @@ IOReturn itlmt7925WifiInterface::setINFRA_ENUMERATED(apple80211_infra_enumerated
 {
     itlmtCall(ctl, 'S', 632);
     return d ? kIOReturnSuccess : kIOReturnError;
+}
+
+// ---- scan and join (stage 3) -----------------------------------------------------------------------------------------------
+//
+// Apple's driver is event driven: the SCAN_REQ / ASSOCIATE ioctls return at once and the outcome reaches userland as events
+// posted with IO80211Controller::postMessage (ids and payload layouts taken from AppleBCMWLANCore / AppleBCMWLANJoinAdapter,
+// 24H32):
+//   0xc9  one scan result: beacon message (below), length 0x40 + ie_len        0xed  scan finished, 4-byte status (0 = ok)
+//   0x4e  association result, 8 bytes {status1, status2}
+//   0xd3  join result, 0x1c bytes: u16 ieee status, u16 aux, u8 flag, bssid[6] at +5, status1 at +0x14, status2 at +0x18
+//   0xd5  connect complete, 0xa4 bytes: u16 ieee status, u16 aux, 10 x {bssid[6], pad[2], u32 status1, u32 status2}
+// Beacon message: +0 u32 ie_len, +4 u16 channel spec (bits 0-7 channel, 11-13 bandwidth index 2 = 20 MHz, 14-15 band, 0xc000 = 5 GHz),
+// +6 ssid[32], +0x26 ssid_len, +0x27 primary channel, +0x29 bssid[6], +0x30 s32 rssi, +0x38 u16 beacon interval, +0x3a u16
+// capability, +0x3c u32 flags (2 always, 0x80 from a beacon, 0x4000 when rssi is valid), +0x40 information elements.
+// Not determined (left zero): noise at +0x34, the u8 flag and +0xc/+0x10 words of 0xd3, the aux words, status values on failure.
+namespace {
+const uint32_t kBeaconHeader = 0x40;
+const uint32_t kEventScanResult = 0xc9, kEventScanDone = 0xed, kEventAssoc = 0x4e, kEventJoin = 0xd3, kEventConnect = 0xd5;
+// 20 MHz channels the core's scan covers (itlmt7925_m2.cpp): the only channels a result can come from.
+const uint8_t kScanChannels[] = {1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161, 165};
+const uint32_t kScanTimeoutTicks = 2500;       // 25 s at the 10 ms tick: the core blocks up to 15 s per scan
+const uint32_t kJoinTimeoutTicks = 4500;       // 45 s: scan for the AP, authentication, association, handshake
+
+void buildBeacon(uint8_t *m, const uint8_t *bssid, uint8_t channel, const char *ssid, uint8_t ssidLen, int8_t rssi, uint16_t cap,
+                 uint16_t interval, const uint8_t *ie, uint16_t ieLen, bool probe)
+{
+    bzero(m, kBeaconHeader + ieLen);
+    store<uint32_t>(m, 0, ieLen);
+    store<uint16_t>(m, 4, (uint16_t)(channel | 0x1000 | (channel > 14 ? 0xC000 : 0)));
+    memcpy(m + 6, ssid, ssidLen > 32 ? 32 : ssidLen);
+    m[0x26] = ssidLen > 32 ? 32 : ssidLen;
+    m[0x27] = channel;
+    memcpy(m + 0x29, bssid, 6);
+    store<int32_t>(m, 0x30, rssi);
+    store<uint16_t>(m, 0x38, interval);
+    store<uint16_t>(m, 0x3a, cap);
+    store<uint32_t>(m, 0x3c, 2u | (probe ? 0u : 0x80u) | (rssi ? 0x4000u : 0u));
+    memcpy(m + kBeaconHeader, ie, ieLen);
+}
+}
+
+bool itlmt7925WifiInterface::queryStatus(ItlNativeStatus *st)
+{
+    if (!core || !bound) return false;
+    st->version = 1;
+    return core->callPlatformFunction(ITL_NATIVE_STATUS, false, st, nullptr, nullptr, nullptr) == kIOReturnSuccess;
+}
+
+void itlmt7925WifiInterface::postEvent(uint32_t code, void *data, size_t length)
+{
+    itlmtCall(ctl, 'P', code);
+    if (ctl) itlmtPostMessage(ctl, this, code, data, length, true);
+}
+
+// getSUPPORTED_CHANNELS / getHW_SUPPORTED_CHANNELS: apple80211_sup_channel_data = u32 version (1), u32 count, then 12-byte
+// apple80211_channel entries {version 1, channel, flags}; flags = band (0x8 2.4 GHz, 0x10 5 GHz) | 0x2 (20 MHz) | 0x80 (active
+// scan allowed). Apple's own filter words (+0x12c8..) are not applied: every entry is a channel the core can scan and join.
+static IOReturn fillSupportedChannels(void *d)
+{
+    if (!d) return kIOReturnBadArgument;
+    const uint32_t n = sizeof(kScanChannels);
+    store<uint32_t>(d, 0, 1);
+    store<uint32_t>(d, 4, n);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t ch = kScanChannels[i];
+        store<uint32_t>(d, 8 + 12 * i, 1);
+        store<uint32_t>(d, 8 + 12 * i + 4, ch);
+        store<uint32_t>(d, 8 + 12 * i + 8, (ch > 14 ? 0x10u : 0x8u) | 0x2u | 0x80u);
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn itlmt7925WifiInterface::getSUPPORTED_CHANNELS(apple80211_sup_channel_data *d)
+{
+    itlmtCall(ctl, 'S', 473);
+    return fillSupportedChannels(d);
+}
+
+IOReturn itlmt7925WifiInterface::getHW_SUPPORTED_CHANNELS(apple80211_sup_channel_data *d)
+{
+    itlmtCall(ctl, 'S', 492);
+    return fillSupportedChannels(d);
+}
+
+// apple80211ScanRequest (partial, from the layout AppleBCMWLANCore's scan handler reads): +0x1c u32 ssid_len, +0x20 ssid[32]. The
+// core always scans its fixed channel list with a wildcard probe; a requested SSID only filters what is reported.
+IOReturn itlmt7925WifiInterface::setWCL_SCAN_REQ(apple80211ScanRequest *d)
+{
+    itlmtCall(ctl, 'S', 594);
+    ItlNativeStatus st;
+    if (!d) return kIOReturnBadArgument;
+    if (!bound || !core || !queryStatus(&st)) return kIOReturnNotReady;
+    uint32_t ssidLen = 0;
+    memcpy(&ssidLen, (const uint8_t *)d + 0x1c, 4);
+    if (ssidLen > 32) return kIOReturnBadArgument;
+    ItlNativeScan sc = {1, 0};
+    IOReturn r = core->callPlatformFunction(ITL_NATIVE_SCAN, false, &sc, nullptr, nullptr, nullptr);
+    if (r != kIOReturnSuccess) return r;
+    IOLockLock(rxLock);
+    scanSsidLen = (uint8_t)ssidLen;
+    memcpy(scanSsid, (const uint8_t *)d + 0x20, ssidLen);
+    scanGenAtReq = st.scanGen;
+    scanImmediate = sc.started == 0;       // the cached table is current: delivered on the next tick (never inside the ioctl)
+    scanTicks = 0;
+    scanActive = true;
+    IOLockUnlock(rxLock);
+    if (scanTraced++ < 4) itlmtTrace(ctl, "scan:request started=%u ssidLen=%u", sc.started, ssidLen);
+    return kIOReturnSuccess;
+}
+
+IOReturn itlmt7925WifiInterface::setWCL_SCAN_ABORT(void *)
+{
+    itlmtCall(ctl, 'S', 589);
+    IOLockLock(rxLock);
+    bool was = scanActive;
+    scanActive = false;
+    IOLockUnlock(rxLock);
+    if (was) {
+        uint32_t status = 0;
+        postEvent(kEventScanDone, &status, sizeof(status));
+    }
+    return kIOReturnSuccess;
+}
+
+// apple80211AssocCandidates (partial): +0x1c u32 ssid_len, +0x20 ssid[32], +0x40 apple80211_key {+4 key_len, +8 cipher_type,
+// +0x10 key[]}. Apple's supplicant runs in userland: cipher_type 6 / 9 with a 32-byte key is the pairwise master key (derived
+// from the passphrase), 0 is "no key". The 4-way handshake and the data keys are the core's; it supports WPA2-PSK / CCMP only.
+IOReturn itlmt7925WifiInterface::setWCL_ASSOCIATE(apple80211AssocCandidates *d)
+{
+    itlmtCall(ctl, 'S', 595);
+    if (!d) return kIOReturnBadArgument;
+    if (!bound || !core) return kIOReturnNotReady;
+    const uint8_t *b = (const uint8_t *)d;
+    uint32_t ssidLen = 0, keyLen = 0, cipher = 0;
+    memcpy(&ssidLen, b + 0x1c, 4);
+    memcpy(&keyLen, b + 0x44, 4);
+    memcpy(&cipher, b + 0x48, 4);
+    itlmtTrace(ctl, "assoc:request ssidLen=%u cipher=%u keyLen=%u", ssidLen, cipher, keyLen);
+    if (ssidLen == 0 || ssidLen > 32) return kIOReturnBadArgument;
+    if (!((cipher == 6 || cipher == 9) && keyLen == 32)) return kIOReturnUnsupported;   // open / SAE / enterprise: not implemented
+    ItlNativeJoin j;
+    bzero(&j, sizeof(j));
+    j.version = 1;
+    j.ssidLen = (uint8_t)ssidLen;
+    memcpy(j.ssid, b + 0x20, ssidLen);
+    memcpy(j.pmk, b + 0x50, 32);
+    IOReturn r = core->callPlatformFunction(ITL_NATIVE_JOIN, false, &j, nullptr, nullptr, nullptr);
+    bzero(&j, sizeof(j));
+    if (r != kIOReturnSuccess) { itlmtTrace(ctl, "assoc:core join=%x", r); return r; }
+    ItlNativeStatus st;
+    bzero(&st, sizeof(st));
+    queryStatus(&st);
+    IOLockLock(rxLock);
+    joinSeq = st.joinSeq;
+    joinTicks = 0;
+    joinActive = true;
+    IOLockUnlock(rxLock);
+    return kIOReturnSuccess;
+}
+
+IOReturn itlmt7925WifiInterface::setWCL_LEAVE_NETWORK(apple80211_leave_network *)
+{
+    itlmtCall(ctl, 'S', 583);
+    IOLockLock(rxLock);
+    joinActive = false;
+    IOLockUnlock(rxLock);
+    if (!core || !bound) return kIOReturnNotReady;
+    IOReturn r = core->callPlatformFunction(ITL_NATIVE_LEAVE, false, nullptr, nullptr, nullptr, nullptr);
+    itlmtTrace(ctl, "assoc:leave=%x", r);
+    return kIOReturnSuccess;
+}
+
+IOReturn itlmt7925WifiInterface::setWCL_JOIN_ABORT(void *)
+{
+    itlmtCall(ctl, 'S', 592);
+    IOLockLock(rxLock);
+    bool was = joinActive;
+    joinActive = false;
+    IOLockUnlock(rxLock);
+    if (was && core && bound) core->callPlatformFunction(ITL_NATIVE_LEAVE, false, nullptr, nullptr, nullptr, nullptr);
+    return kIOReturnSuccess;
+}
+
+// The current BSS as a beacon message (AppleBCMWLANCore::getWCL_BSS_INFO builds it from the firmware's BSS info;
+// 0xe00002bc while not associated). Here the core's target AP (captured from its beacon / probe response).
+IOReturn itlmt7925WifiInterface::getWCL_BSS_INFO(apple80211_beacon_msg *d)
+{
+    itlmtCall(ctl, 'S', 522);
+    if (!d) return kIOReturnBadArgument;
+    ItlNativeStatus st;
+    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP) return kIOReturnError;
+    buildBeacon((uint8_t *)d, st.bssid, st.channel, st.ssid, st.ssidLen, st.rssi, st.capability, st.beaconInterval, st.ie,
+                st.ieLen, false);
+    return kIOReturnSuccess;
+}
+
+void itlmt7925WifiInterface::deliverScanResults()
+{
+    ItlNativeNets n;
+    bzero(&n, sizeof(n));
+    n.version = 1;
+    n.max = ITL_NATIVE_AP_MAX;
+    n.aps = snap;
+    uint32_t posted = 0, seen = 0;
+    if (snap && core && core->callPlatformFunction(ITL_NATIVE_NETS, false, &n, nullptr, nullptr, nullptr) == kIOReturnSuccess) {
+        IOLockLock(rxLock);
+        uint8_t wantLen = scanSsidLen;
+        char want[32];
+        memcpy(want, scanSsid, sizeof(want));
+        IOLockUnlock(rxLock);
+        uint8_t msg[kBeaconHeader + ITL_NATIVE_IE_MAX];
+        seen = n.count;
+        for (uint32_t i = 0; i < n.count; i++) {
+            const ItlNativeAp &a = snap[i];
+            if (a.ageMs > 60000 || !a.channel) continue;                           // not heard in the last minute
+            if (wantLen && (a.ssidLen != wantLen || memcmp(a.ssid, want, wantLen))) continue;
+            buildBeacon(msg, a.bssid, a.channel, a.ssid, a.ssidLen, a.rssi, a.capability, a.beaconInterval, a.ie, a.ieLen,
+                        a.probeResponse);
+            postEvent(kEventScanResult, msg, kBeaconHeader + a.ieLen);
+            posted++;
+        }
+    }
+    uint32_t status = 0;
+    postEvent(kEventScanDone, &status, sizeof(status));
+    if (scanTraced++ < 8) itlmtTrace(ctl, "scan:delivered %u of %u", posted, seen);
+}
+
+// Association outcome (0x4e, 0xd3, then on success 0xd5). On failure the ieee status is 1 (unspecified failure); the codes Apple
+// derives from the firmware event are not determined.
+void itlmt7925WifiInterface::finishJoin(const ItlNativeStatus &st, bool ok)
+{
+    uint32_t assoc[2] = {ok ? 0u : 1u, 0};
+    postEvent(kEventAssoc, assoc, sizeof(assoc));
+    uint8_t join[0x1c];
+    bzero(join, sizeof(join));
+    store<uint16_t>(join, 0, ok ? 0 : 1);
+    memcpy(join + 5, st.bssid, 6);
+    store<uint32_t>(join, 0x14, assoc[0]);
+    postEvent(kEventJoin, join, sizeof(join));
+    if (ok) {
+        uint8_t done[0xa4];
+        bzero(done, sizeof(done));
+        memcpy(done + 4, st.bssid, 6);
+        postEvent(kEventConnect, done, sizeof(done));
+    }
+    itlmtTrace(ctl, "assoc:result ok=%u stage=%u", ok, st.failStage);
+}
+
+// Runs every 10 ms tick on the interface's work queue; asks the core every 100 ms while a scan or join is outstanding.
+void itlmt7925WifiInterface::pollControl()
+{
+    if (!bound || !core) return;
+    IOLockLock(rxLock);
+    bool sa = scanActive, ja = joinActive, imm = scanImmediate;
+    IOLockUnlock(rxLock);
+    if (!sa && !ja) return;
+    bool poll = imm || (++controlTicks % 10) == 0;
+    if (!poll) return;
+    ItlNativeStatus st;
+    if (!queryStatus(&st)) return;
+    if (sa) {
+        IOLockLock(rxLock);
+        bool done = scanImmediate || (st.scanGen != scanGenAtReq && !st.scanBusy) || (scanTicks += 10) >= kScanTimeoutTicks;
+        if (done) { scanActive = false; scanImmediate = false; }
+        IOLockUnlock(rxLock);
+        if (done) deliverScanResults();
+    }
+    if (ja) {
+        IOLockLock(rxLock);
+        bool mine = st.joinSeq == joinSeq;
+        bool timeout = (joinTicks += 10) >= kJoinTimeoutTicks;
+        bool up = mine && st.state == ITL_NATIVE_UP, failed = mine && st.state == ITL_NATIVE_FAILED;
+        if (up || failed || timeout) joinActive = false;
+        IOLockUnlock(rxLock);
+        if (up) finishJoin(st, true);
+        else if (failed || timeout) {
+            if (timeout && !failed) core->callPlatformFunction(ITL_NATIVE_LEAVE, false, nullptr, nullptr, nullptr, nullptr);
+            finishJoin(st, false);
+        }
+    }
 }
 
 #define ITL_IFACE_DEFS

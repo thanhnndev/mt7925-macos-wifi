@@ -22,7 +22,8 @@ PURE = re.compile(r'/\*\s*(\d+)\s*\*/\s*virtual\s+(\S+)\s+(\w+)\((.*?)\)\s*=\s*0
 # implemented outside this generated file: setMacAddress with the native station identity; the rest with layouts taken from
 # Apple's AppleBCMWLANCore handlers (itlmt7925_iface.cpp, "IO80211InfraProtocol handlers with layouts taken from Apple's ...")
 CUSTOM = {'setMacAddress', 'getCHANNEL', 'getPOWERSAVE', 'getRATE', 'getOP_MODE', 'getRSSI', 'setUSB_HOST_NOTIFICATION',
-          'setOS_FEATURE_FLAGS', 'setINFRA_ENUMERATED'}
+          'setOS_FEATURE_FLAGS', 'setINFRA_ENUMERATED', 'getSUPPORTED_CHANNELS', 'getHW_SUPPORTED_CHANNELS', 'getWCL_BSS_INFO',
+          'setWCL_SCAN_REQ', 'setWCL_SCAN_ABORT', 'setWCL_ASSOCIATE', 'setWCL_LEAVE_NETWORK', 'setWCL_JOIN_ABORT'}
 
 
 def pure_slots():

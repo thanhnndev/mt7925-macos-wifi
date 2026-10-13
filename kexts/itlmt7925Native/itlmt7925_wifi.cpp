@@ -594,11 +594,21 @@ IO80211FaultReporter *itlmt7925Wifi::getFaultReporterFromDriver()
 // with an Apple-derived layout are let through: POWER and COUNTRY_CODE on the controller; CHANNEL, POWERSAVE, RATE, OP_MODE, RSSI,
 // USB_HOST_NOTIFICATION, OS_FEATURE_FLAGS and INFRA_ENUMERATED on the interface. 0x1b/0xcf/0xd8/0x103 stay refused (their data
 // comes from firmware tables this driver does not have; nothing is invented for them).
+//
+// Round 15 (scan and join): 0x1b / 0xfe (supported channels), 0x1b9 SCAN_REQ, 0x1b3 SCAN_ABORT, 0x1ba ASSOCIATE, 0x1b6 JOIN_ABORT,
+// 0x1a9 LEAVE_NETWORK and 0x1b1 WCL_BSS_INFO have handlers with Apple-derived layouts. The rest of the group are let through only
+// so the call recorder shows who asks for them and when (their stubs answer kIOReturnUnsupported, as the layout is not known):
+// 0x3 CIPHER_KEY, 0x7 TXPOWER, 0x1c LOCALE, 0xcf CHANNELS_INFO, 0xd8 ROAM_PROFILE, 0xff BTCOEX_PROFILE, 0x103 MAX_NSS_FOR_AP,
+// 0x17b COUNTRY_CHANNELS_INFO, 0x1aa REASSOC, 0x1bc LINK_UP_DONE, 0x1c1 WCL_CHANNELS_INFO, 0x1c6 LINK_STATE_UPDATE,
+// 0x1cc WCL_EXTENDED_BSS_INFO, 0x1eb WNM_OPS, 0x216 PLATFORM_CONFIG.
 static bool commandAllowed(int cmd)
 {
     switch (cmd) {
     case 0x04: case 0x05: case 0x08: case 0x0c: case 0x0f: case 0x10: case 0x13: case 0x16b: case 0x1d5: case 0x200:
     case 0x2b: case 0x2c: case 0x33:
+    case 0x1b: case 0xfe: case 0x1b9: case 0x1b3: case 0x1ba: case 0x1b6: case 0x1a9: case 0x1b1:
+    case 0x03: case 0x07: case 0x1c: case 0xcf: case 0xd8: case 0xff: case 0x103: case 0x17b: case 0x1aa: case 0x1bc:
+    case 0x1c1: case 0x1c6: case 0x1cc: case 0x1eb: case 0x216:
         return true;
     default:
         return false;
