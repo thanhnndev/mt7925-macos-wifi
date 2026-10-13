@@ -204,3 +204,22 @@ Round14 identifies omitted packet preparation, missing Family station seed and m
 Expected next boot: fixed station identity without shell repair; `dp:Family link=1 begin gate=1 thread=0` followed by result=1/state=2; real media active without patched ifmediareq; `dp:RX prepare=0 buffers=0->1`, `dp:first RX delivered`, and a DHCP lease. Different before-count can occur for recycled objects; preparation return and after-count matter. If RX fails, send step/rc/packet/len trace plus counters. No CoreWLAN scan/join implementation or end-to-end networking success is claimed yet.
 
 Legacy ItlWiFi login agent is disabled for this experiment; its prior plist and launchctl state are under `~/itlmt-backup/legacy-ui-20261013`. On returning to legacy mode after EFI restore, re-enable with `launchctl enable gui/$(id -u)/com.itlmt7925.ItlWiFi` and bootstrap its saved/current LaunchAgents plist if it is not loaded. No legacy Ethernet driver object was present; required core firmware/radio engine stays enabled.
+
+## CARD_CAPABILITIES (ioctl 12) — 2026-10-13, build after 3b4ff24 (not hardware-tested)
+
+* Live evidence on the 3b4ff24 boot (`itlmt_native=1 itlmt_native_if=1 itlmt_native_dp=1`): en9 `UP,RUNNING`, `status: inactive`; registry
+  trace `ioctl:cmd=c prohibited` (also 0x216, 0x33, 0x1c) and `itlmt_ioctl_rejected` = 1409. CoreWLAN lists no interface and
+  `SCNetworkInterfaceCopyAll()` does not return en9, although a direct BSD lookup of en9 reports IEEE80211. Apple's client library
+  asks DRIVER_VERSION (0x2b) and then CARD_CAPABILITIES (0xc) when it binds an interface; the controller refused 0xc with 0x3a and
+  `getCARD_CAPABILITIES` returned unsupported, so the bind can stop there. That the refusal is *the* reason Settings sees no Wi-Fi is
+  **a hypothesis**: it is the only ioctl in the trace that the bind step needs and that we refuse; the next boot decides.
+* Change (`itlmt7925_wifi.cpp`): `isCommandProhibited` also allows 0xc; `getCARD_CAPABILITIES` writes the 0x18-byte extent that
+  `AppleBCMWLANCore::getCARD_CAPABILITIES` (0xffffff80015f16ca) writes, reporting only the bits Apple sets without consulting chip state
+  (constants, two unconditional ORs, and the two bits set when BCM feature flags 1 and 7 are absent). Bits Apple derives from firmware
+  features / chip revision / radio state stay clear. Which bit is which capability is **chưa xác định** (names live in userland).
+* Build + link check: `bash scripts/build.sh itlmt7925Native` ok; `check_kext_links.py` exit 0, only the 6 baseline-missing symbols.
+  No virtual signature changed (slots unaffected).
+* Next boot, read: `ioctl:cmd=c allowed`, `ioctl:CARD_CAPABILITIES answered`; then which *new* ioctl IDs appear in the trace
+  (first 32 distinct are recorded: the library's next requests after the bind are the next handlers to implement), and whether
+  `networksetup -listallhardwareports` / CoreWLAN list en9. If still absent, the matching/user-client path airportd uses is the
+  next thing to dump (not done).

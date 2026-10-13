@@ -125,3 +125,8 @@ large; commit the distilled tables.
   `itlmt_native_if=1`; compiled with the kext flags and slot-checked against Apple's vtables (209 + 19 overrides, 0 wrong), then
   built and link-checked on the Mac (exit 0; only the 6 baseline-missing `IONetworkController` symbols), not loaded. Next: first load. Details:
   [IO80211-ABI-2.md](IO80211-ABI-2.md#native-stub-stage-2-cloud-session-2026-10-12-interface--pool--queues-compiled-and-slot-checked-never-loaded).
+
+* 2026-10-13 (Mac, live boot of 3b4ff24): CoreWLAN lists no interface and `SCNetworkInterfaceCopyAll()` omits en9 even though en9 is
+  `UP,RUNNING` and a direct BSD lookup says IEEE80211. The controller refuses ioctl 12 (CARD_CAPABILITIES), which Apple's library asks
+  right after DRIVER_VERSION when binding; the build after 3b4ff24 answers it with the unconditional subset of Apple's capability bits.
+  Hypothesis, untested on hardware. Details: [TEST-NATIVE-WIFI.md](TEST-NATIVE-WIFI.md) "CARD_CAPABILITIES (ioctl 12)".

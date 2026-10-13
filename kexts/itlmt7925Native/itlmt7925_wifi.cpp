@@ -55,6 +55,7 @@ private:
     uint32_t tracedCommands[32] = {};
     uint32_t tracedCommandCount = 0;
     uint32_t rejectedCommands = 0;
+    bool capsTraced = false;
     uint8_t stationAddress[6] = {0x02, 0x00, 0x79, 0x25, 0x00, 0x01};
     bool makeLogger(IOService *owner);
     bool makeFaultReporter(IOService *owner);
@@ -437,15 +438,25 @@ IO80211FaultReporter *itlmt7925Wifi::getFaultReporterFromDriver()
 // Every request is refused until an interface exists.
 // Only the two static-property ioctls IO80211InfraInterface::updateStaticProperties sends during BSD attach (0x2c HARDWARE_VERSION,
 // 0x2b DRIVER_VERSION) are allowed; everything else stays refused until the matching handler exists.
+//
+// 0xc CARD_CAPABILITIES joined the allowed set after the live trace of build 3b4ff24 showed userland asking for it right after
+// the version pair and getting 0x3a (registry: `ioctl:cmd=c prohibited`, `itlmt_ioctl_rejected` in the thousands while the
+// interface was otherwise up). Apple's client library asks DRIVER_VERSION then CARD_CAPABILITIES when it binds an interface;
+// a refusal there ends the bind before CoreWLAN lists the device.
+static bool commandAllowed(int cmd)
+{
+    return cmd == 0x0c || cmd == 0x2b || cmd == 0x2c;
+}
+
 IOReturn itlmt7925Wifi::isCommandProhibited(int cmd)
 {
     bool seen = false;
     for (uint32_t n = 0; n < tracedCommandCount; n++) if (tracedCommands[n] == (uint32_t)cmd) seen = true;
     if (!seen && tracedCommandCount < 32) {
         tracedCommands[tracedCommandCount++] = (uint32_t)cmd;
-        itlmtTrace(this, "ioctl:cmd=%x %s", cmd, (cmd == 0x2b || cmd == 0x2c) ? "allowed" : "prohibited");
+        itlmtTrace(this, "ioctl:cmd=%x %s", cmd, commandAllowed(cmd) ? "allowed" : "prohibited");
     }
-    if (cmd == 0x2b || cmd == 0x2c)
+    if (commandAllowed(cmd))
         return kIOReturnSuccess;
     if ((++rejectedCommands & 63) == 1)
         setProperty("itlmt_ioctl_rejected", (uint64_t)rejectedCommands, 64);
@@ -489,9 +500,37 @@ IOReturn itlmt7925Wifi::getHARDWARE_VERSION(IO80211SkywalkInterface *, apple8021
     return fillVersion(d, "MediaTek MT7925");
 }
 
-IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple80211_capability_data *)
+// apple80211_capability_data, only the extent Apple's driver writes (AppleBCMWLANCore::getCARD_CAPABILITIES, 0xffffff80015f16ca,
+// 24H32): u32 version at +0 and a 20-byte capability bit array at +4..+0x17 (every byte of it is stored by that function, either
+// by an immediate or by the qword/byte clears at +7/+0xf/+0x17). Nothing past +0x17 is written there, so nothing past it is
+// written here; sizeof the struct is not known and the caller's buffer is at least that large.
+//
+// Which bit means which capability is not established by the dumps (the names live in userland). Policy: report only what Apple's
+// function reports without consulting chip state: (a) the stores of constants at +4/+5/+6/+9/+0xc/+0xd, (b) the two unconditional
+// ORs (+7 |= 4, +0xa |= 4), (c) the two bits it sets when BCM firmware feature flags 1 and 7 are *absent* (+6 |= 0x10|0x02, +9 |= 1),
+// which is literally true here because there is no BCM feature table. Every bit that Apple derives from a firmware feature flag,
+// chip revision or radio state (about 100 bits) stays clear: we claim nothing we cannot back.
+IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple80211_capability_data *data)
 {
-    return kIOReturnUnsupported;
+    if (!data)
+        return kIOReturnBadArgument;
+    uint8_t *d = (uint8_t *)data;
+    bzero(d, 0x18);
+    put<uint32_t>(d, 0x00, 1);                  // version
+    d[0x04] = 0x6f;                             // word 0xe66f at +4
+    d[0x05] = 0xe6;
+    d[0x06] = 0x61 | 0x10 | 0x02;               // constant 0x61, + flags 1 and 7 absent
+    d[0x07] = 0x04;                             // unconditional OR
+    d[0x09] = 0x40 | 0x01;                      // constant 0x40, + flag 1 absent
+    d[0x0a] = 0x04;                             // unconditional OR
+    d[0x0c] = 0x01;                             // word 0x0201 at +0xc
+    d[0x0d] = 0x02;
+    // userland polls this one; the trace buffer is small, so only the first answer is recorded
+    if (!capsTraced) {
+        capsTraced = true;
+        itlmtTrace(this, "ioctl:CARD_CAPABILITIES answered");
+    }
+    return kIOReturnSuccess;
 }
 
 IOReturn itlmt7925Wifi::getPOWER(IO80211SkywalkInterface *, apple80211_power_data *)
