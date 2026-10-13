@@ -512,7 +512,7 @@ static const char *failText(const char *stage)
     if (!strncmp(stage, "roc-fail", 8)) return "radio did not get the channel";
     if (!strncmp(stage, "auth-fail", 9)) return "the access point refused authentication";
     if (!strncmp(stage, "assoc-fail", 10)) return "the access point refused association";
-    if (!strncmp(stage, "hs-fail", 7)) return "key handshake failed (wrong password?)";
+    if (!strncmp(stage, "hs-fail", 7)) return "key handshake failed";
     return "connection failed";
 }
 

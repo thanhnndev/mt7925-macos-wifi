@@ -170,12 +170,18 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
     if (m3dataOn && m3RxData(p, len)) return;
     if (m3dataOn && lvl >= 1 && m3RxCtl(p, len)) return;                                     // Block Ack action frame / BlockAckReq
     if (m3wantFc && m3RxMgmt(p, len)) return;
-    if (m3linkUp && len >= 32 + 26) {                  // deauthentication / disassociation from our AP: the link is gone
+    if ((m3linkUp || m3wantEapol) && len >= 32 + 26) {                  // deauthentication / disassociation from our AP: the link is gone
         for (uint32_t off = 32; off + 26 <= len && off < 160; off++) {
             uint8_t fc = p[off];
             if ((fc != 0xc0 && fc != 0xa0) || p[off + 1] != 0) continue;
             if (memcmp(p + off + 10, tgtBssid, 6) != 0 || memcmp(p + off + 16, tgtBssid, 6) != 0) continue;
             if (memcmp(p + off + 4, mac, 6) != 0 && !(p[off + 4] & 1)) continue;
+            if (m3wantEapol) {
+                m3hsApLeave = true;
+                m3hsApReason = (uint16_t)(p[off + 24] | (p[off + 25] << 8));
+                m3log("eapol AP %s reason=%u", fc == 0xc0 ? "deauthentication" : "disassociation", m3hsApReason);
+                return;
+            }
             snprintf(m3lostWhy, sizeof(m3lostWhy), "%s from the AP, reason %u", fc == 0xc0 ? "deauthentication" : "disassociation",
                      (unsigned)(p[off + 24] | (p[off + 25] << 8)));
             m3lost = true;

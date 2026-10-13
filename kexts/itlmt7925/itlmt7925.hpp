@@ -187,8 +187,17 @@ private:
     // step 4: association complete -> 4-way handshake, keys, Ethernet interface, data path
     bool m3dataOn = false;                   // data frames from the AP are handled (set after association)
     bool m3wantEapol = false;
+    bool m3hsApLeave = false;
+    uint16_t m3hsApReason = 0;
     uint8_t m3eapol[420] = {0};
     uint32_t m3eapolLen = 0;
+    // RX polling may deliver several EAPOL packets before the handshake gets CPU time.
+    // Only the core worker produces/consumes this queue; no network-stack callback accesses it.
+    static const uint32_t kEapolQueue = 8;
+    struct EapolRx { uint32_t len; uint8_t data[420]; };
+    EapolRx m3eapolQueue[kEapolQueue] = {};
+    uint32_t m3eapolHead = 0, m3eapolTail = 0, m3eapolDrops = 0;
+    bool m3EapolNext();
     uint8_t m3ptk[48] = {0};                 // KCK(16) KEK(16) TK(16)
     bool m3sleepy = false;                   // m3Pump sleeps instead of spinning once the link is up
     volatile bool m3linkUp = false;

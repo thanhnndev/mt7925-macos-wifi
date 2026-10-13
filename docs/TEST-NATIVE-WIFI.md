@@ -501,3 +501,12 @@ airportd/WiFiAgent: GET SSID/BSSID answered `0xe0822403` (no association) althou
 3. If `P:d8` is there but no `I:1b1`: the FSM rejected LINK_UP (read the `wifi` log of WCLNetManager for the state), or the
    subscription table has no 0xd8 entry in the live build — then dump `gNET_MANAGERCallBackArray` again.
 4. Link loss: force one (move the AP out of range); expect `wcl:link status posted up=0 reason=1` then `assoc:leave=...`.
+
+
+## Handshake correction after the 36e0da6 boot — 2026-10-13
+
+Settings scan works, but two native joins failed at M1 -> M2 -> no M3 (stage 6), before the new link-status event.
+Corrected discarded M1 retransmissions and single-frame EAPOL RX mailbox; added replay/ANonce/MIC checks, AP-leave reasons,
+optional PMKID equality and a persistent `wifi-handshake` summary. Both kexts built, link/slot/OC checks passed and executables
+were staged on ESP with credentials/config preserved. Hardware result pending; the old logs cannot prove the exact failure cause.
+See [result and next observations](native-wifi-results/20261013-handshake-36e0da6/README.md).

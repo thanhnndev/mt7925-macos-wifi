@@ -768,6 +768,7 @@ int itlmt7925::m3Run1()
     m3linkUp = false;
     m3wantEapol = false;
     m3eapolLen = 0;
+    m3eapolHead = m3eapolTail = m3eapolDrops = 0;
     m3rxLen = 0;
     fastActive = false;
     txPool = false;
@@ -1164,11 +1165,7 @@ bool itlmt7925::m3RxData(const uint8_t *p, uint32_t len)
             lastRxDataMs = nowMs();
             if (et == 0x888e) {
                 stRxEapol++;
-                if (m3wantEapol && !m3eapolLen) {
-                    uint32_t n = pn > sizeof(m3eapol) ? (uint32_t)sizeof(m3eapol) : pn;
-                    memcpy(m3eapol, pl, n);
-                    m3eapolLen = n;
-                }
+                if (m3wantEapol) m3Eapol(pl, pn);
                 return true;
             }
             if (!m3linkUp || pn > 1600) { stRxDrop++; return true; }
@@ -1267,47 +1264,157 @@ int itlmt7925::m3Key(uint16_t wcid, bool pairwise, uint8_t keyId, const uint8_t 
     return rc;
 }
 
+// Preserve every complete key frame in a poll batch. The previous single mailbox silently
+// discarded M3 when a retransmitted M1 happened to arrive first in the same batch.
+bool itlmt7925::m3Eapol(const uint8_t *p, uint32_t len)
+{
+    itl_eapol_key k;
+    int rc = itl_eapol_parse(p, len, &k);
+    if (rc) { m3log("eapol rx rejected parse=%d len=%u", rc, len); return false; }
+    uint32_t n = 4u + be16p(p + 2);
+    if (n > sizeof(m3eapol) || m3eapolHead - m3eapolTail >= kEapolQueue) {
+        m3eapolDrops++;
+        m3log("eapol rx dropped len=%u depth=%u drops=%u", n, m3eapolHead - m3eapolTail, m3eapolDrops);
+        return false;
+    }
+    EapolRx &r = m3eapolQueue[m3eapolHead++ % kEapolQueue];
+    r.len = n;
+    memcpy(r.data, p, n);
+    return true;
+}
+
+bool itlmt7925::m3EapolNext()
+{
+    if (m3eapolTail == m3eapolHead) return false;
+    EapolRx &r = m3eapolQueue[m3eapolTail++ % kEapolQueue];
+    m3eapolLen = r.len;
+    memcpy(m3eapol, r.data, r.len);
+    bzero(&r, sizeof(r));
+    return true;
+}
+
 int itlmt7925::m3Handshake()
 {
     static const uint8_t rsnIe[22] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
                                       0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
-    uint8_t snonce[32], zero[32], replay[8], out[160], kd[8 * 40];
+    uint8_t snonce[32], zero[32], replay[8] = {}, anonce[32] = {}, out[160], kd[8 * 40];
     itl_eapol_key k;
+    itl_ptk ptk = {};
     bzero(zero, sizeof(zero));
     read_random(snonce, sizeof(snonce));
     m3dataOn = true;
     m3eapolLen = 0;
+    m3eapolHead = m3eapolTail = m3eapolDrops = 0;
+    m3hsApLeave = false;
+    m3hsApReason = 0;
+    removeProperty("wifi-pmkid-match");
+    removeProperty("wifi-handshake");
     m3wantEapol = true;
 
-    for (uint32_t i = 0; i < 6000 && !m3eapolLen; i++) m3Pump(1);
-    if (!m3eapolLen) { m3log("eapol: no msg1 (rxdata=%u rxpk=%u)", stRxData, rxPkts); return ITL_TIMEOUT; }
-    if (itl_eapol_parse(m3eapol, m3eapolLen, &k) || !(k.info & ITL_KI_ACK) || (k.info & ITL_KI_MIC)) {
-        m3log("eapol: bad msg1 len=%u", m3eapolLen);
-        return ITL_EIO;
-    }
-    m3log("eapol m1 info=%04x len=%u", k.info, m3eapolLen);
-    memcpy(replay, k.replay, 8);
-    itl_ptk ptk;
-    itl_wpa_ptk(m3pmk, tgtBssid, mac, k.nonce, snonce, &ptk);
-
-    size_t n2 = itl_eapol_build(out, 0x010a, 0, replay, snonce, rsnIe, sizeof(rsnIe));       // ver 2 | pairwise | MIC
-    itl_eapol_mic(ptk.kck, out, n2);
-
-    bool got3 = false;
-    for (int attempt = 1; attempt <= 4 && !got3; attempt++) {
-        m3eapolLen = 0;
+    bool have1 = false, got3 = false;
+    uint32_t m1Count = 0, m2Count = 0, badMic = 0, rejected = 0;
+    uint32_t started = nowMs(), phaseStart = started, lastM2 = 0;
+    uint32_t rxBefore = stRxEapol, freeBefore = stTxFree, failBefore = stTxFwFail;
+    size_t n2 = 0;
+    auto sendM2 = [&]() {
         bool ok = m3TxData(tgtBssid, 0x888e, out, (uint32_t)n2, false);
-        m3log("eapol m2 tx #%d %s", attempt, ok ? "queued" : "FAILED");
-        for (uint32_t i = 0; i < 1500 && !got3; i++) {
-            m3Pump(1);
-            if (!m3eapolLen) continue;
-            if (itl_eapol_parse(m3eapol, m3eapolLen, &k) == 0 && (k.info & ITL_KI_MIC) && (k.info & ITL_KI_INSTALL)) got3 = true;
-            else m3eapolLen = 0;                              // a repeated msg1: wait on, the AP will still send msg3
+        m2Count++;
+        lastM2 = nowMs();
+        m3log("eapol m2 #%u queued=%u replay=%02x%02x%02x%02x%02x%02x%02x%02x", m2Count, ok,
+              replay[0], replay[1], replay[2], replay[3], replay[4], replay[5], replay[6], replay[7]);
+    };
+    // Six seconds for M1 and, after the first M1, six for M3. Retransmitted M1s
+    // do not extend the deadline. Each one gets a response with ITS counter and ANonce.
+    while ((uint32_t)(nowMs() - phaseStart) < 6000 && !got3 && !m3hsApLeave) {
+        m3Pump(1);
+        if (m3hsApLeave) break;
+        while (m3EapolNext()) {
+            int rc = itl_eapol_parse(m3eapol, m3eapolLen, &k);
+            if (rc) { rejected++; continue; }
+            m3log("eapol rx info=%04x len=%u replay=%02x%02x%02x%02x%02x%02x%02x%02x",
+                  k.info, m3eapolLen, k.replay[0], k.replay[1], k.replay[2], k.replay[3],
+                  k.replay[4], k.replay[5], k.replay[6], k.replay[7]);
+            const uint16_t required = ITL_KI_PAIRWISE | ITL_KI_ACK;
+            if ((k.info & ITL_KI_VER_MASK) != 2 || (k.info & required) != required ||
+                (k.info & (ITL_KI_ERROR | ITL_KI_REQUEST))) {
+                rejected++;
+                m3log("eapol rejected unsupported flags=%04x", k.info);
+                continue;
+            }
+            if (!(k.info & ITL_KI_MIC) && !(k.info & ITL_KI_INSTALL)) {
+                int cmp = have1 ? memcmp(k.replay, replay, 8) : 1;
+                if (cmp < 0 || (have1 && cmp == 0 && memcmp(k.nonce, anonce, 32))) {
+                    rejected++;
+                    m3log("eapol m1 rejected stale/inconsistent replay");
+                    continue;
+                }
+                if (!have1) {
+                    phaseStart = nowMs();
+                    // An AP may include its PMKID in M1. Compare without publishing either
+                    // key or hash: this separates a PMK/station-identity mismatch from lost M2/M3.
+                    bool pmkidPresent = false;
+                    const uint8_t *e = k.data, *end = k.data + k.datalen;
+                    for (; e + 2 <= end && e + 2 + e[1] <= end; e += 2 + e[1]) {
+                        if (e[0] != 0xdd || e[1] != 20 || e[2] != 0 || e[3] != 0x0f || e[4] != 0xac || e[5] != 4) continue;
+                        uint8_t name[20], hash[20], diff = 0;
+                        memcpy(name, "PMK Name", 8);
+                        memcpy(name + 8, tgtBssid, 6);
+                        memcpy(name + 14, mac, 6);
+                        itl_hmac_sha1(m3pmk, 32, name, sizeof(name), nullptr, 0, hash);
+                        for (int i = 0; i < 16; i++) diff |= hash[i] ^ e[6 + i];
+                        setProperty("wifi-pmkid-match", diff == 0);
+                        m3log("eapol m1 PMKID present match=%u", diff == 0);
+                        bzero(hash, sizeof(hash));
+                        pmkidPresent = true;
+                        break;
+                    }
+                    if (!pmkidPresent) m3log("eapol m1 PMKID absent");
+                }
+                bool changed = !have1 || memcmp(anonce, k.nonce, 32);
+                memcpy(replay, k.replay, 8);
+                memcpy(anonce, k.nonce, 32);
+                if (changed) itl_wpa_ptk(m3pmk, tgtBssid, mac, anonce, snonce, &ptk);
+                have1 = true;
+                m1Count++;
+                n2 = itl_eapol_build(out, 0x010a, 0, replay, snonce, rsnIe, sizeof(rsnIe));
+                itl_eapol_mic(ptk.kck, out, n2);
+                m3log("eapol m1 #%u anonceChanged=%u", m1Count, changed);
+                sendM2();
+                continue;
+            }
+            if (!have1 || (k.info & (ITL_KI_MIC | ITL_KI_INSTALL)) != (ITL_KI_MIC | ITL_KI_INSTALL)) {
+                rejected++;
+                m3log("eapol rejected unexpected state/flags");
+                continue;
+            }
+            if (memcmp(k.replay, replay, 8) <= 0 || memcmp(k.nonce, anonce, 32)) {
+                rejected++;
+                m3log("eapol m3 rejected replay/ANonce");
+                continue;
+            }
+            uint32_t elen = 4u + be16p(m3eapol + 2);
+            if (!itl_eapol_mic_ok(ptk.kck, m3eapol, elen)) {
+                badMic++;
+                m3log("eapol m3 MIC rejected count=%u", badMic);
+                continue;
+            }
+            got3 = true;
+            break;  // k.data points into m3eapol: do not pop another frame before GTK processing.
         }
+        if (!got3 && have1 && (uint32_t)(nowMs() - lastM2) >= 1500) sendM2();
     }
-    if (!got3) { m3log("eapol: no msg3"); return ITL_TIMEOUT; }
-    uint32_t elen = 4u + be16p(m3eapol + 2);
-    if (!itl_eapol_mic_ok(ptk.kck, m3eapol, elen)) { m3log("eapol: msg3 MIC bad"); return ITL_EIO; }
+    char summary[200];
+    snprintf(summary, sizeof(summary), "m1=%u m2=%u m3=%u rx=%u micBad=%u reject=%u drop=%u txFree=%u txFail=%u apLeave=%u reason=%u ms=%u",
+             m1Count, m2Count, got3, stRxEapol - rxBefore, badMic, rejected, m3eapolDrops,
+             stTxFree - freeBefore, stTxFwFail - failBefore, m3hsApLeave, m3hsApReason, nowMs() - started);
+    setProperty("wifi-handshake", summary); // survives saturation of the older 3 KB m3-log
+    m3log("eapol summary %s", summary);
+    if (!got3) {
+        bzero(&ptk, sizeof(ptk));
+        bzero(snonce, sizeof(snonce));
+        m3log("eapol: %s", have1 ? "no valid msg3" : "no msg1");
+        return (badMic || m3hsApLeave) ? ITL_EIO : ITL_TIMEOUT;
+    }
     m3log("eapol m3 info=%04x mic ok datalen=%u", k.info, k.datalen);
 
     // key data: wrapped RSN IE + GTK KDE
