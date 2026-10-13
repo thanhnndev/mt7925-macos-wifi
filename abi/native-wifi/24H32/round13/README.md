@@ -1,6 +1,6 @@
 # Datapath ownership and local bridge experiment — 24H32
 
-Collected with tools/dump_native_wifi_datapath.py; 118 executable functions, recorded KC SHA-256 in source.json. No KC binary committed.
+Collected with tools/dump_native_wifi_datapath.py; 125 executable functions, recorded KC SHA-256 in source.json. No KC binary committed.
 
 ## Evidence used
 
@@ -30,3 +30,7 @@ Read-only test on the running 5e3afae kernel: SCNetworkInterfaceCopyAll excludes
 ## Hardware test pending
 
 Build both core and native; static build/link/slot results are recorded in TEST-NATIVE-WIFI.md. Install Stage B exclusive with dp=1 and nvtrace=1; leave wl/publish defaults 1/2. After reboot collect before changing flags, then explicitly enable en9 / create its Wi-Fi service using the backed-up helper and inspect native/core counters, link, media and traffic. Stop on panic and recover its backtrace plus NVRAM checkpoints. Sleep/wake and unload have not been validated; inherited core worker shutdown is still incomplete. UI radio power and native scan/join getters/setters remain unsupported, so this experiment does not claim fully working native Wi-Fi.
+
+## BSD link reporting follow-up
+
+IONetworkController::_broadcastEvent only notifies objects conforming to IONetworkInterface; the native Skywalk interface does not. Controller setLinkStatus alone therefore cannot notify BSD. The verified nonvirtual IOSkywalkNetworkInterface::reportLinkStatus(status, medium) updates media/link status and posts BSD link events without IO80211 Glue ioctl calls. The native timer now calls it with the real core radio state and IEEE80211Auto; NotAttached is retried without unbounded checkpoint logging until the BSD client is ready. The declaration uses the checked Mach-O export so generated vtable headers stay untouched. Link check still has only six baseline missing symbols.

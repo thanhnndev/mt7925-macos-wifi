@@ -490,9 +490,20 @@ void itlmt7925WifiInterface::drainDatapath()
     linkDirty = false;
     IOLockUnlock(rxLock);
     if (dirty) {
-        itlmtTrace(ctl, "dp:radio link=%u", up);
+        if (!linkTraceValid || up != linkTraceUp) {
+            linkTraceValid = true; linkTraceUp = up;
+            itlmtTrace(ctl, "dp:radio link=%u", up);
+        }
         ctl->setLinkStatus(kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0),
                            up ? ctl->getSelectedMedium() : nullptr, up ? speed : 0);
+        // Classic controller broadcast skips Skywalk (not IONetworkInterface).
+        // The verified Skywalk nonvirtual method updates media and posts BSD link events.
+        IOReturn reported = itlmtReportSkywalkLink(this,
+            kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0), kIOMediumIEEE80211Auto);
+        if (reported != kIOReturnSuccess) {
+            IOLockLock(rxLock); linkDirty = true; IOLockUnlock(rxLock);
+            if (++linkReportFailures <= 3) itlmtTrace(ctl, "dp:BSD link report=%x", reported);
+        } else linkReportFailures = 0;
         setProperty("itlmt_radio_link", up);
     }
     // TX staging has already copied packet bytes. Return Skywalk ownership exactly once.

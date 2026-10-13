@@ -13,14 +13,16 @@ EXPECTED = 'cd013c14a7f21dbb8181fb06c44e079de8646b6a674abe21f6e47f42e8979af3'
 if hashlib.sha256(kc.d).hexdigest() != EXPECTED or kc.md is None:
     sys.exit('Requires recorded 24H32 KC and Capstone')
 classes = ('IOSkywalkPacket', 'IOSkywalkTxSubmissionQueue', 'IOSkywalkTxCompletionQueue',
-           'IOSkywalkRxCompletionQueue', 'IOSkywalkPacketBufferPool', 'IO80211SkywalkInterface')
+           'IOSkywalkRxCompletionQueue', 'IOSkywalkPacketBufferPool', 'IO80211SkywalkInterface',
+           'IOSkywalkNetworkInterface', 'IONetworkController')
 terms = ('getDataVirtualAddress', 'getDataLength', 'getBufferSize', 'getPacketBufferCount',
          'setDataLength', 'setDataOffset', 'getDataOffset', 'completeWithQueue', 'completeE',
          'allocatePacketE', 'deallocatePacketE', 'enqueuePackets', 'synchronize',
          'refillTxRingForNetworking', 'getPacketListForNetworking', 'enableEv', 'disableEv',
          'packetCompletion', 'checkForWork', 'packetSubmission', 'completePackets',
          'withPool', 'initWithPool', 'requestDequeue', 'legacyDequeue',
-         'setInterfaceEnable', 'setRunningState', 'completePreparedPacket')
+         'setInterfaceEnable', 'setRunningState', 'completePreparedPacket',
+         'reportLinkStatus', 'reportEventType', 'setLinkStatus', '_broadcastEvent')
 out = Path(sys.argv[1])
 out.mkdir(parents=True, exist_ok=True)
 found = {}

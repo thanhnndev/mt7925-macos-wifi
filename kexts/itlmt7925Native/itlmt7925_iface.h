@@ -76,6 +76,8 @@ private:
     uint32_t pendingCount = 0;
     bool dpEnabled = false, bound = false, radioUp = false, linkDirty = false;
     bool firstTxTrace = false, firstRxTrace = false, firstCompletionTrace = false;
+    bool linkTraceValid = false, linkTraceUp = false;
+    uint32_t linkReportFailures = 0;
     uint64_t radioSpeed = 0;
     uint32_t txSent = 0, txDropped = 0, txStalled = 0, txCompleted = 0;
     uint32_t rxReceived = 0, rxDropped = 0, rxDelivered = 0, ticks = 0;

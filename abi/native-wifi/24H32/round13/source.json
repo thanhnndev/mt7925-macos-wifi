@@ -30,6 +30,18 @@
       "address": "0xffffff8002265a04",
       "file": "ZN23IO80211SkywalkInterface18setInterfaceEnableEb_265a04.asm.txt"
     },
+    "__ZN19IONetworkController15_broadcastEventEjPv": {
+      "address": "0xffffff800262dbb4",
+      "file": "ZN19IONetworkController15_broadcastEventEjPv_62dbb4.asm.txt"
+    },
+    "__ZN19IONetworkController14allocatePacketEj": {
+      "address": "0xffffff800262ddda",
+      "file": "ZN19IONetworkController14allocatePacketEj_62ddda.asm.txt"
+    },
+    "__ZN19IONetworkController13setLinkStatusEjPK15IONetworkMediumyP6OSData": {
+      "address": "0xffffff800262e62e",
+      "file": "ZN19IONetworkController13setLinkStatusEjPK15IONetworkMediumyP6OSData_62e62e.asm.txt"
+    },
     "__ZN30IOUserNetworkPacketQueueCompat12initWithPoolEP25IOSkywalkPacketBufferPooljjjjP8OSObjectPFvS3_zEP25IODataQueueDispatchSourcePv": {
       "address": "0xffffff80029796aa",
       "file": "ZN30IOUserNetworkPacketQueueCompat12initWithPoolEP25IOSkywalkPacketBufferPooljjjjP8OSObjectPFvS3_zEP25IODataQu_9796aa.asm.txt"
@@ -193,6 +205,22 @@
     "__ZN20IOSkywalkPacketQueue16packetCompletionEjjb": {
       "address": "0xffffff8002980f88",
       "file": "ZN20IOSkywalkPacketQueue16packetCompletionEjjb_980f88.asm.txt"
+    },
+    "__ZN25IOSkywalkNetworkInterface15reportEventTypeEjPvm": {
+      "address": "0xffffff800298223e",
+      "file": "ZN25IOSkywalkNetworkInterface15reportEventTypeEjPvm_98223e.asm.txt"
+    },
+    "__ZN25IOSkywalkNetworkInterface16reportLinkStatusEjj": {
+      "address": "0xffffff8002982c04",
+      "file": "ZN25IOSkywalkNetworkInterface16reportLinkStatusEjj_982c04.asm.txt"
+    },
+    "__ZN25IOSkywalkNetworkInterface18setInterfaceEnableEb": {
+      "address": "0xffffff8002982cbc",
+      "file": "ZN25IOSkywalkNetworkInterface18setInterfaceEnableEb_982cbc.asm.txt"
+    },
+    "__ZN25IOSkywalkNetworkInterface15setRunningStateEb": {
+      "address": "0xffffff8002982cc4",
+      "file": "ZN25IOSkywalkNetworkInterface15setRunningStateEb_982cc4.asm.txt"
     },
     "__ZN26IOSkywalkTxSubmissionQueue8withPoolEP25IOSkywalkPacketBufferPooljjP8OSObjectPFjS3_PS_PjEPFjS3_S4_PKP15IOSkywalkPacketjPvESC_jj": {
       "address": "0xffffff8002983ff0",

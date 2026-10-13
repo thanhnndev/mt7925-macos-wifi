@@ -10,6 +10,12 @@
 #include <IOKit/IOService.h>
 #include <stdint.h>
 
+class IOSkywalkNetworkInterface;
+// Nonvirtual 24H32 method, verified in the local dump. Explicit Mach-O symbol
+// avoids editing the generated class/vtable headers.
+extern "C" IOReturn itlmtReportSkywalkLink(IOSkywalkNetworkInterface *, uint32_t status, uint32_t medium)
+    __asm__("__ZN25IOSkywalkNetworkInterface16reportLinkStatusEjj");
+
 class IOSkywalkPacket : public OSObject {
 public:
     uint32_t getDataLength() const;
