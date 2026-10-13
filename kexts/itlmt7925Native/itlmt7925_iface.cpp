@@ -15,7 +15,6 @@
 #include <stdarg.h>
 #include <string.h>
 #include <pexpert/pexpert.h>
-#include <net/kpi_interface.h>
 
 #define super IO80211InfraProtocol
 OSDefineMetaClassAndStructors(itlmt7925WifiInterface, IO80211InfraProtocol)
@@ -101,6 +100,12 @@ itlmt7925WifiInterface *itlmt7925WifiInterface::withController(IO80211Controller
         i->release();
         return nullptr;
     }
+    IOEthernetAddress station = {};
+    if (controller->getHardwareAddress(&station) != kIOReturnSuccess ||
+        !i->IO80211SkywalkInterface::init(controller, (ether_addr *)&station)) {
+        i->release(); return nullptr;
+    }
+    // Seed station identity before start constructs Family MAC agent.
     i->setInterfaceRole(role);
     i->setInterfaceId(ifId);
     i->ctl = controller;
@@ -202,11 +207,11 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
             destroyPoolAndQueues();
             return false;
         }
-        ItlNativeSink sink = {1, this, receiveFromCore, linkFromCore};
+        ItlNativeSink sink = {2, this, ctl, receiveFromCore, linkFromCore};
         IOReturn br = core->callPlatformFunction(ITL_NATIVE_BIND, false, &sink, nullptr, nullptr, nullptr);
         itlmtTrace(ctl, "dp:bind=%x", br);
         if (br != kIOReturnSuccess) { destroyPoolAndQueues(); return false; }
-        bound = true;
+        IOLockLock(rxLock); bound = true; IOLockUnlock(rxLock);
         dpTimer->setTimeoutMS(10);
     }
 
@@ -237,10 +242,11 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
 // removeEventSource, release.
 void itlmt7925WifiInterface::destroyPoolAndQueues()
 {
-    if (bound && core) {
+    bool wasBound = false;
+    if (rxLock) { IOLockLock(rxLock); wasBound = bound; bound = false; IOLockUnlock(rxLock); }
+    if (wasBound && core) {
         itlmtTrace(ctl, "dp:unbind begin");
         core->callPlatformFunction(ITL_NATIVE_UNBIND, false, this, nullptr, nullptr, nullptr);
-        bound = false;
     }
     dpEnabled = false;
     if (dpTimer) {
@@ -401,28 +407,6 @@ IOReturn itlmt7925WifiInterface::disable(uint32_t options)
     return result;
 }
 
-IOReturn itlmt7925WifiInterface::getHardwareAddress(ether_addr *address)
-{
-    if (!address || !ctl) return kIOReturnBadArgument;
-    IOEthernetAddress station = {};
-    IOReturn r = ctl->getHardwareAddress(&station);
-    if (r == kIOReturnSuccess) memcpy(address, &station, 6);
-    return r;
-}
-
-IOReturn itlmt7925WifiInterface::prepareBSDInterface(__ifnet *netif, uint32_t options)
-{
-    IOReturn r = IO80211InfraProtocol::prepareBSDInterface(netif, options);
-    if (r == kIOReturnSuccess && netif && bound) {
-        IOEthernetAddress station = {};
-        IOReturn mac = ctl->getHardwareAddress(&station);
-        int address = mac == kIOReturnSuccess ? ifnet_set_lladdr(netif, &station, 6) : -1;
-        int offload = ifnet_set_offload(netif, 0);
-        itlmtTrace(ctl, "if:BSD station=%d offload=%d", address, offload);
-    }
-    return r;
-}
-
 IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t command, void *data)
 {
     bool media = command == 0xc02c6938 || command == 0xc0286938;
@@ -431,15 +415,6 @@ IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t comm
     if (firstMedia || command == 0x80206910)
         itlmtTrace(ctl, "if:bsd cmd=%x begin", command);
     IOReturn result = IO80211InfraProtocol::processBSDCommand(netif, command, data);
-    // 24H32 updateMediumStatus reads its internal state directly, bypassing
-    // linkState(). Preserve the base supported-media handling, then publish
-    // actual radio state in the shared 32/64-bit ifmediareq status field (+0x18).
-    if (media && result == kIOReturnSuccess && data && bound && rxLock) {
-        IOLockLock(rxLock);
-        uint32_t status = radioUp ? 3u : 1u; // IFM_AVALID | IFM_ACTIVE
-        IOLockUnlock(rxLock);
-        memcpy((uint8_t *)data + 0x18, &status, sizeof(status));
-    }
     // Record only media queries and interface flags; never dump ioctl payloads.
     if (firstMedia || command == 0x80206910 || (media && result != lastMediaResult[index]))
         itlmtTrace(ctl, "if:bsd cmd=%x result=%x", command, result);
@@ -452,19 +427,11 @@ IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t comm
     return result;
 }
 
-uint32_t itlmt7925WifiInterface::linkState()
-{
-    if (!bound || !rxLock) return IO80211InfraProtocol::linkState();
-    IOLockLock(rxLock);
-    bool up = radioUp;
-    IOLockUnlock(rxLock);
-    // SDK enum and round-12 medium-status branches: Undefined=0, Down=1, Up=2.
-    return up ? 2 : 1;
-}
-
 uint32_t itlmt7925WifiInterface::getHardwareAssists()
 {
     // Core TX accepts complete Ethernet frames. It has no checksum/TSO offload.
+    if (!assistsTraced) { assistsTraced = true; itlmtTrace(ctl, "if:hardware assists=0"); }
+    setProperty("itlmt_hw_assists", (uint64_t)0, 32);
     return 0;
 }
 
@@ -548,8 +515,35 @@ void itlmt7925WifiInterface::linkFromCore(OSObject *owner, bool up, uint64_t spe
     auto *i = (itlmt7925WifiInterface *)owner;
     if (!i->rxLock) return;
     IOLockLock(i->rxLock);
-    i->radioUp = up; i->radioSpeed = speed; i->linkDirty = true;
+    i->radioUp = up; i->radioSpeed = speed;
+    IOWorkLoop *loop = i->bound ? i->queued : nullptr;
+    if (loop) loop->retain();
     IOLockUnlock(i->rxLock);
+    // Core worker calls outside bridge lock with owner/controller retained.
+    // runAction enters gate on that caller, not the work-loop event thread.
+    if (loop) { loop->runAction(applyRadioLink, i); loop->release(); }
+}
+
+IOReturn itlmt7925WifiInterface::applyRadioLink(OSObject *owner, void *, void *, void *, void *)
+{
+    auto *i = (itlmt7925WifiInterface *)owner;
+    if (!i->bound || !i->ctl || !i->queued) return kIOReturnNotAttached;
+    if (!i->queued->inGate() || i->queued->onThread()) {
+        itlmtTrace(i->ctl, "dp:Family link rejected gate/thread"); return kIOReturnNotPermitted;
+    }
+    IOLockLock(i->rxLock);
+    bool up = i->radioUp;
+    uint64_t speed = i->radioSpeed;
+    IOLockUnlock(i->rxLock);
+    i->ctl->setLinkStatus(kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0),
+                         up ? i->ctl->getSelectedMedium() : nullptr, up ? speed : 0);
+    itlmtTrace(i->ctl, "dp:Family link=%u begin gate=1 thread=0", up);
+    bool ok = i->IO80211InfraInterface::setLinkState((IO80211LinkState)(up ? 2 : 1), 0, false, 0);
+    itlmtTrace(i->ctl, "dp:Family link=%u result=%u state=%u", up, ok, i->IO80211InfraInterface::linkState());
+    i->ctl->setLinkStatus(kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0),
+                         up ? i->ctl->getSelectedMedium() : nullptr, up ? speed : 0);
+    i->setProperty("itlmt_radio_link", up);
+    return ok ? kIOReturnSuccess : kIOReturnError;
 }
 
 void itlmt7925WifiInterface::datapathTick(OSObject *owner, IOTimerEventSource *)
@@ -560,28 +554,6 @@ void itlmt7925WifiInterface::datapathTick(OSObject *owner, IOTimerEventSource *)
 void itlmt7925WifiInterface::drainDatapath()
 {
     if (!bound || !core || !dpTimer) return;
-    IOLockLock(rxLock);
-    bool dirty = linkDirty, up = radioUp;
-    uint64_t speed = radioSpeed;
-    linkDirty = false;
-    IOLockUnlock(rxLock);
-    if (dirty) {
-        if (!linkTraceValid || up != linkTraceUp) {
-            linkTraceValid = true; linkTraceUp = up;
-            itlmtTrace(ctl, "dp:radio link=%u", up);
-        }
-        ctl->setLinkStatus(kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0),
-                           up ? ctl->getSelectedMedium() : nullptr, up ? speed : 0);
-        // Classic controller broadcast skips Skywalk (not IONetworkInterface).
-        // The verified Skywalk nonvirtual method updates media and posts BSD link events.
-        IOReturn reported = itlmtReportSkywalkLink(this,
-            kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0), kIOMediumIEEE80211Auto);
-        if (reported != kIOReturnSuccess) {
-            IOLockLock(rxLock); linkDirty = true; IOLockUnlock(rxLock);
-            if (++linkReportFailures <= 3) itlmtTrace(ctl, "dp:BSD link report=%x", reported);
-        } else linkReportFailures = 0;
-        setProperty("itlmt_radio_link", up);
-    }
     // TX staging has already copied packet bytes. Return Skywalk ownership exactly once.
     while (pendingCount) {
         if (!firstCompletionTrace) {
@@ -608,18 +580,50 @@ void itlmt7925WifiInterface::drainDatapath()
             if (!firstRxTrace) { firstRxTrace = true; itlmtTrace(ctl, "dp:RX allocation/enqueue begin"); }
             IOSkywalkPacket *p = nullptr;
             IOReturn r = pool->allocatePacket(1, &p, 1); // no-sleep allocation on the native work loop
+            const char *step = "allocate";
             if (r == kIOReturnSuccess && p) {
-                bool single = p->getPacketBufferCount() == 1;
-                void *data = single ? p->getDataVirtualAddress() : nullptr;
-                if (!data || p->getBufferSize() < f.length)
+                step = "prepare";
+                // Allocation acquires only handle. Prepare materializes buflets
+                // for CPU copy; RX enqueue completes/finalizes for networking.
+                uint32_t before = p->getPacketBufferCount();
+                r = p->prepareWithQueue(nullptr, 0, 0);
+                uint32_t buffers = p->getPacketBufferCount();
+                if (rxDelivered == 0 && rxFailureTraceCount == 0)
+                    itlmtTrace(ctl, "dp:RX prepare=%x buffers=%u->%u", r, before, buffers);
+                bool single = buffers == 1;
+                void *data = r == kIOReturnSuccess && single ? p->getDataVirtualAddress() : nullptr;
+                if (r == kIOReturnSuccess) step = "buffer";
+                if (r != kIOReturnSuccess) { /* preserve preparation error */ }
+                else if (!data || p->getBufferSize() < f.length)
                     r = kIOReturnNoSpace;
                 else {
                     memcpy(data, f.bytes, f.length);
+                    step = "length";
                     r = p->setDataOffsetAndLength(0, f.length);
-                    if (r == kIOReturnSuccess) r = rxComp->enqueuePackets(&p, 1, 0);
+                    if (r == kIOReturnSuccess) {
+                        step = "metadata";
+                        auto *network = static_cast<IOSkywalkNetworkPacket *>(p);
+                        uint32_t l2 = 14;
+                        uint16_t type = itl_checksum::read16(f.bytes + 12);
+                        for (uint32_t tag = 0; tag < 2 && (type == 0x8100 || type == 0x88a8); tag++) {
+                            if (f.length < l2 + 4) { r = kIOReturnBadArgument; break; }
+                            type = itl_checksum::read16(f.bytes + l2 + 2); l2 += 4;
+                        }
+                        bool broadcast = true;
+                        for (uint32_t b = 0; b < 6; b++) if (f.bytes[b] != 0xff) broadcast = false;
+                        if (r == kIOReturnSuccess) r = network->setHeadroom(0);
+                        if (r == kIOReturnSuccess) r = network->setLinkHeaderLength((uint8_t)l2);
+                        if (r == kIOReturnSuccess) r = network->setIsLinkBroadcast(broadcast);
+                        if (r == kIOReturnSuccess) r = network->setIsLinkMulticast(!broadcast && (f.bytes[0] & 1));
+                        // No hardware checksum-validation claim; stack validates received IP.
+                        if (r == kIOReturnSuccess) r = network->setRxChecksumInfo(0, 0);
+                    }
+                    if (r == kIOReturnSuccess) { step = "enqueue"; r = rxComp->enqueuePackets(&p, 1, 0); }
                 }
                 if (r != kIOReturnSuccess) pool->deallocatePacket(p);
             }
+            if ((r != kIOReturnSuccess || !p) && rxFailureTraceCount++ < 8)
+                itlmtTrace(ctl, "dp:RX failed step=%s rc=%x packet=%u len=%u", step, r, p != nullptr, f.length);
             if (r == kIOReturnSuccess && p) rxDelivered++;
             else { IOLockLock(rxLock); rxDropped++; IOLockUnlock(rxLock); }
             if (r == kIOReturnSuccess && p && rxDelivered == 1) itlmtTrace(ctl, "dp:first RX delivered");

@@ -196,3 +196,11 @@ After the next boot, first collect baseline logs and media/discovery, then enabl
 * 2026-10-13, c78492b boot: no panic, native auto-enable/core link up; DHCP still blocked by inactive BSD media, traffic counters zero. Follow-up corrects ifmediareq status after Family handling, applies station address and clears BSD offloads during prepare. Interface slots 217 correct/0 wrong; only six baseline symbols missing. See docs/native-wifi-results/20261013-datapath-c78492b/.
 
 * 2026-10-13, 78852cc boot: no panic; en9 media active, DHCP transmits, TX/completion work. No lease; RX reaches bridge but first frame drops during allocation/validation/enqueue (substep not traced). Live MAC correction succeeded after prepare returned ENXIO. See docs/native-wifi-results/20261013-datapath-78852cc/.
+
+## RX root investigation — 2026-10-13
+
+Round14 identifies omitted packet preparation, missing Family station seed and missing Infra link-state transition. The next build replaces the earlier BSD media/MAC patches with proper lifecycle calls, supplies RX Ethernet metadata, and includes step-specific RX failure tracing. Build **both** core and native: link callback bridge ABI is now v2. Slots: controller 22/interface 214 correct, zero wrong; all generated interface headers have zero slot mismatches; link check permits only six reserved baseline symbols. Hardware outcome remains pending.
+
+Expected next boot: fixed station identity without shell repair; `dp:Family link=1 begin gate=1 thread=0` followed by result=1/state=2; real media active without patched ifmediareq; `dp:RX prepare=0 buffers=0->1`, `dp:first RX delivered`, and a DHCP lease. Different before-count can occur for recycled objects; preparation return and after-count matter. If RX fails, send step/rc/packet/len trace plus counters. No CoreWLAN scan/join implementation or end-to-end networking success is claimed yet.
+
+Legacy ItlWiFi login agent is disabled for this experiment; its prior plist and launchctl state are under `~/itlmt-backup/legacy-ui-20261013`. On returning to legacy mode after EFI restore, re-enable with `launchctl enable gui/$(id -u)/com.itlmt7925.ItlWiFi` and bootstrap its saved/current LaunchAgents plist if it is not loaded. No legacy Ethernet driver object was present; required core firmware/radio engine stays enabled.

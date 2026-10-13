@@ -95,6 +95,9 @@ IOReturn itlmt7925::newUserClient(task_t owningTask, void *securityID, UInt32 ty
                                   IOUserClient **handler)
 {
     if (!handler) return kIOReturnBadArgument;
+    // Exclusive native datapath owns radio policy; legacy menu app must not
+    // send scan/join/disconnect commands behind IO80211's back.
+    if (nativeMode) { *handler = nullptr; return kIOReturnUnsupported; }
     itlmt7925UC *uc = OSTypeAlloc(itlmt7925UC);
     if (!uc) return kIOReturnNoMemory;
     if (!uc->initWithTask(owningTask, securityID, type, properties)) { uc->release(); return kIOReturnError; }

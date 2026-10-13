@@ -10,12 +10,7 @@
 #include <IOKit/IOService.h>
 #include <stdint.h>
 
-class IOSkywalkNetworkInterface;
-// Nonvirtual 24H32 method, verified in the local dump. Explicit Mach-O symbol
-// avoids editing the generated class/vtable headers.
-extern "C" IOReturn itlmtReportSkywalkLink(IOSkywalkNetworkInterface *, uint32_t status, uint32_t medium)
-    __asm__("__ZN25IOSkywalkNetworkInterface16reportLinkStatusEjj");
-
+class IOSkywalkPacketQueue;
 class IOSkywalkPacket : public OSObject {
 public:
     uint32_t getDataLength() const;
@@ -23,7 +18,19 @@ public:
     uint32_t getPacketBufferCount() const;
     uint16_t getDataOffset() const;
     void *getDataVirtualAddress() const;
+    IOReturn prepareWithQueue(IOSkywalkPacketQueue *, uint32_t direction, uint32_t options);
     IOReturn setDataOffsetAndLength(uint16_t offset, uint32_t length);
+};
+
+// The plain pool's type 1 factory creates IOSkywalkNetworkPacket (round14).
+// These are nonvirtual wrappers around the kernel packet metadata API.
+class IOSkywalkNetworkPacket : public IOSkywalkPacket {
+public:
+    IOReturn setHeadroom(uint8_t);
+    IOReturn setLinkHeaderLength(uint8_t);
+    IOReturn setIsLinkBroadcast(bool);
+    IOReturn setIsLinkMulticast(bool);
+    IOReturn setRxChecksumInfo(uint32_t, uint16_t);
 };
 
 class IOSkywalkPacketBufferPool : public OSObject {

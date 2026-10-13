@@ -7,8 +7,9 @@
 #                                                 backup first, then copy the kext to OC/Kexts and add the Kernel/Add entry + boot-args.
 #                                                 --stage a (default) = controller only (itlmt_native=1); b = + interface (itlmt_native_if=1).
 #                                                 --exclusive = switch the old Wi-Fi off for this test: removes itlmt_m2/itlmt_m3/itlmt_fast
-#                                                 (the core still loads and, with itlmt_m1, loads the firmware, but never scans/joins and
-#                                                 creates no Ethernet interface), so only one of the two paths is live. restore undoes it.
+#                                                 Core remains the chip backend. With itlmt_native_dp=1 it scans/joins for native,
+#                                                 suppresses legacy Ethernet and legacy user clients; otherwise it only loads firmware.
+#                                                 restore undoes the EFI/boot-args changes.
 #   scripts/native-wifi-test.sh restore [dir]     put the newest (or given) backup back, replacing ESP:/EFI
 #   scripts/native-wifi-test.sh logs              collect kextstat/ioreg/log of the last boot into ~/itlmt-backup/logs-<time>
 # ESP is taken from /Volumes/ESP (scripts/esp-automount.sh) or from ESP=/path.

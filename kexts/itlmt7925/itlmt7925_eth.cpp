@@ -234,8 +234,16 @@ void itlmt7925::ethLink(bool up)
 {
     if (nativeMode && nativeLock) {
         IOLockLock(nativeLock);
-        if (nativeSink.owner && nativeSink.link) nativeSink.link(nativeSink.owner, up, up ? linkSpeedBps() : 0);
+        ItlNativeSink sink = nativeSink;
+        if (sink.owner && sink.lifetime && sink.link) { sink.owner->retain(); sink.lifetime->retain(); }
+        else sink.owner = nullptr;
         IOLockUnlock(nativeLock);
+        // Family link updates can sleep on the native gate. Never hold bridge
+        // lock while entering it: gated stop/unbind acquires that lock.
+        if (sink.owner) {
+            sink.link(sink.owner, up, up ? linkSpeedBps() : 0);
+            sink.owner->release(); sink.lifetime->release();
+        }
         return;
     }
     if (!eth) return;
@@ -271,13 +279,13 @@ IOReturn itlmt7925::callPlatformFunction(const OSSymbol *name, bool wait, void *
     if (name->isEqualTo(ITL_NATIVE_BIND)) {
         ItlNativeSink *sink = (ItlNativeSink *)p1;
         if (!nativeMode || !nativeLock) return kIOReturnNotReady;
-        if (!sink || sink->version != 1 || !sink->owner || !sink->receive || !sink->link)
+        if (!sink || sink->version != 2 || !sink->lifetime || !sink->owner || !sink->receive || !sink->link)
             return kIOReturnBadArgument;
         IOLockLock(nativeLock);
         if (nativeSink.owner) { IOLockUnlock(nativeLock); return kIOReturnBusy; }
         nativeSink = *sink;
         nativeSink.link(nativeSink.owner, m3linkUp, m3linkUp ? linkSpeedBps() : 0);
-        // Unbind is a callback barrier: callbacks execute under nativeLock.
+        // RX callbacks remain under nativeLock. Link snapshots retain owner/controller and gated actions recheck bound.
         IOLockUnlock(nativeLock);
         IOLog("itlmt7925 native: sink bound\n");
         return kIOReturnSuccess;

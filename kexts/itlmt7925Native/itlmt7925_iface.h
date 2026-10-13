@@ -38,9 +38,6 @@ public:
     IOReturn enable(uint32_t options) override;
     IOReturn disable(uint32_t options) override;
     void setInterfaceEnable(bool enabled) override;
-    IOReturn prepareBSDInterface(__ifnet *, uint32_t) override;
-    IOReturn getHardwareAddress(ether_addr *) override;
-    uint32_t linkState() override;
     uint32_t getHardwareAssists() override;
     IOReturn processBSDCommand(__ifnet *netif, uint32_t command, void *data) override;
 
@@ -62,6 +59,7 @@ public:
     uint32_t submitPackets(IOSkywalkPacket *const *, uint32_t);
     static void receiveFromCore(OSObject *, const uint8_t *, uint32_t);
     static void linkFromCore(OSObject *, bool, uint64_t);
+    static IOReturn applyRadioLink(OSObject *, void *, void *, void *, void *);
     static void datapathTick(OSObject *, IOTimerEventSource *);
 
 #define ITL_IFACE_DECLS
@@ -78,10 +76,10 @@ private:
     uint32_t rxHead = 0, rxTail = 0;
     IOSkywalkPacket *pendingTx[512] = {};
     uint32_t pendingCount = 0;
-    bool dpEnabled = false, bound = false, radioUp = false, linkDirty = false;
+    bool dpEnabled = false, bound = false, radioUp = false;
     bool firstTxTrace = false, firstRxTrace = false, firstCompletionTrace = false;
-    bool linkTraceValid = false, linkTraceUp = false;
-    uint32_t linkReportFailures = 0;
+    uint32_t rxFailureTraceCount = 0;
+    bool assistsTraced = false;
     bool mediaTraced[2] = {};
     IOReturn lastMediaResult[2] = {kIOReturnSuccess, kIOReturnSuccess};
     uint32_t mediaQueryCount = 0;

@@ -1259,7 +1259,7 @@ void itlmt7925::m3Link()
 {
     bool eok = nativeMode || eth || ethCreate();
     m3log("%s interface %s", nativeMode ? "native" : "ethernet", eok ? "ready" : "FAILED");
-    ethLink(true);
+    if (!nativeMode) ethLink(true);
     baReset();
     txSn = 0;
     stRxUni = stTxUni = 0;
@@ -1279,6 +1279,9 @@ void itlmt7925::m3Link()
     tgtRssi = 0;
     wifiState("connected", "");
     wifiLink();
+    // Native publication may wake DHCP immediately. Radio TX/session state
+    // must already be ready before entering the Family link transition.
+    if (nativeMode) ethLink(true);
     evLog("up lvl %u ch %u bw %u", lvl, tgtCh, fastActive ? fastBw : 0);
     bool watchdogDone = false;
     for (;;) {
