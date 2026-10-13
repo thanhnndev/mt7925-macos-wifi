@@ -773,8 +773,11 @@ void itlmt7925WifiInterface::drainDatapath()
                         for (uint32_t b = 0; b < 6; b++) if (f.bytes[b] != 0xff) broadcast = false;
                         if (r == kIOReturnSuccess) r = network->setHeadroom(0);
                         if (r == kIOReturnSuccess) r = network->setLinkHeaderLength((uint8_t)l2);
-                        if (r == kIOReturnSuccess) r = network->setIsLinkBroadcast(broadcast);
-                        if (r == kIOReturnSuccess) r = network->setIsLinkMulticast(!broadcast && (f.bytes[0] & 1));
+                        // The bool argument of both setters is ignored by IOSkywalk (24H32 0xffffff800297f262 / ...f290 call
+                        // kern_packet_set_link_broadcast/_multicast unconditionally), so a call is itself the flag: call only when true.
+                        // Calling them for every frame marked unicast IPv4 as link broadcast and the stack dropped it.
+                        if (r == kIOReturnSuccess && broadcast) r = network->setIsLinkBroadcast(true);
+                        else if (r == kIOReturnSuccess && (f.bytes[0] & 1)) r = network->setIsLinkMulticast(true);
                         // No hardware checksum-validation claim; stack validates received IP.
                         if (r == kIOReturnSuccess) r = network->setRxChecksumInfo(0, 0);
                     }

@@ -409,3 +409,21 @@ Both kexts build; `check_kext_links.py` only the 6 baseline-missing symbols; `ch
    or just read `ioreg -l -w0 | grep itlmt_native_trace_tail` and
    `log show --last 3m --info --debug --predicate 'process == "kernel" AND eventMessage CONTAINS "IOC DEBUG"'`.
 2. Expect `INTERNAL: Set type=<APPLE80211_IOC_WCL_ASSOCIATE>` and the 0x1ab/0x170 GET/SET before it.
+
+### Result of the join capture (2026-10-13, round-16 build still loaded)
+
+* **Join works.** Trace: GET 0x1ab, SET 0x170 (setMacAddress answered "change refused", tolerated), 0x1ba `WCL_ASSOCIATE`,
+  `assoc:request ssidLen=8 cipher=6 keyLen=32`, `assoc:result ok=1`, family link up, DHCP lease obtained (ACK from the gateway).
+  Counters at the time: TX 66 / RX 20 frames, no drops.
+* **No internet: every unicast IPv4 frame was dropped after BPF.** `tcpdump -i en4` (root) showed ICMP echo replies, TCP SYN-ACK and
+  DNS answers arriving with the correct destination MAC, yet `netstat -s -p icmp` never counted an echo reply and TCP kept
+  retransmitting the SYN. ARP (including unicast requests) and broadcast DHCP worked, so the destination MAC match was not the
+  problem; only IPv4/IPv6 unicast was.
+* **Root cause:** `IOSkywalkNetworkPacket::setIsLinkBroadcast(bool)` (24H32 `0xffffff800297f262`) and `setIsLinkMulticast(bool)`
+  (`0xffffff800297f290`) ignore their argument: both call `kern_packet_set_link_broadcast` / `_multicast` unconditionally. The RX
+  path called both for every frame, so each frame was marked link-broadcast **and** link-multicast; the IP stack discards a
+  unicast IP packet that arrived as a link-layer broadcast/multicast (ICMP echo, TCP), ARP and DHCP do not care.
+* **Fix (round 17):** call `setIsLinkBroadcast(true)` only for the all-ones destination and `setIsLinkMulticast(true)` only for
+  other group addresses; never call them otherwise (the call itself is the flag).
+* Expected next boot: `ping` to the gateway answers, DNS/TCP work. The default route may still prefer the en1 tether service;
+  if browsing keeps using en1, reorder Network service order (not a driver problem).
