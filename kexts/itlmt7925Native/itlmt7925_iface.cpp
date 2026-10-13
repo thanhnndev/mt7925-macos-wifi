@@ -873,8 +873,9 @@ IOReturn itlmt7925WifiInterface::getRATE(apple80211_rate_data *d)
     return kIOReturnSuccess;
 }
 
-// 0xffffff80015f2088: qword at +0 = 1 (version 1, mode word 0), then +4 |= mode bits of the BSS manager when associated
-// (apple80211 mode bit 0x2 = station).
+// 0xffffff80015f2088: qword at +0 = 1 (version 1, mode word 0), then +4 |= mode bits of the BSS manager when associated.
+// The bit is APPLE80211_M_STA = 0x1 (apple80211_var.h; 0x2 is IBSS: round 20 answered 2 and System Information showed the
+// current network as "Computer to Computer Network").
 IOReturn itlmt7925WifiInterface::getOP_MODE(apple80211_opmode_data *d)
 {
     itlmtCall(ctl, 'S', 471);
@@ -882,7 +883,7 @@ IOReturn itlmt7925WifiInterface::getOP_MODE(apple80211_opmode_data *d)
     ItlNativeStatus st;
     bool assoc = queryStatus(&st) && st.state == ITL_NATIVE_UP;
     store<uint32_t>(d, 0, 1);
-    store<uint32_t>(d, 4, assoc ? 2u : 0u);
+    store<uint32_t>(d, 4, assoc ? 1u : 0u);                                  // APPLE80211_M_STA
     return kIOReturnSuccess;
 }
 
@@ -1273,6 +1274,7 @@ void itlmt7925WifiInterface::finishJoin(const ItlNativeStatus &st, bool ok)
         IOLockLock(rxLock);
         memcpy(nmBssid, st.bssid, 6);
         nmLinkUp = true;
+        nmEverJoined = true;
         linkDownPending = false;
         IOLockUnlock(rxLock);
         postLinkStatus(st.bssid, true, 0);
@@ -1328,6 +1330,18 @@ void itlmt7925WifiInterface::pollControl()
     }
     IOLockUnlock(rxLock);
     if (down) postLinkStatus(downBssid, false, 1);
+    // The core can restore the link without being asked (a fast-mode ladder step, or the AP dropped us and the supervisor
+    // rejoined). The family was told the link went down, so it has to be told again, with the sequence a requested join uses.
+    if (!ja && (++reannounceTicks % 50) == 0) {
+        IOLockLock(rxLock);
+        bool want = nmEverJoined && radioUp && !nmLinkUp && !linkDownPending;
+        IOLockUnlock(rxLock);
+        ItlNativeStatus rs;
+        if (want && queryStatus(&rs) && rs.state == ITL_NATIVE_UP && rs.channel) {
+            if (reannounceTraced++ < 4) itlmtTrace(ctl, "wcl:link restored by core, announcing again ch=%u", rs.channel);
+            finishJoin(rs, true);
+        }
+    }
     if (!sa && !ja) return;
     bool poll = imm || (++controlTicks % 10) == 0;
     if (!poll) return;

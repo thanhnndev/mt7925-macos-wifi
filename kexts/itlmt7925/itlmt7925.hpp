@@ -303,6 +303,11 @@ private:
     AmsduAsm amsduAsm = {};
     uint32_t stAmsduPkt = 0, stAmsduSub = 0, stAmsduBad = 0, stRxBigDrop = 0;
     uint32_t amsduLogged = 0, amsduBadLogged = 0, rxdLogged = 0;
+    // 802.11 duplicate detection for unicast data outside a Block Ack reorder window: the AP resends an MPDU whose ACK it did not
+    // hear (Retry bit set, same sequence number), and nothing below this driver drops it. Index = TID, 8 = non-QoS.
+    uint16_t rxLastSn[9] = {};
+    uint16_t rxLastValid = 0;
+    uint32_t stRxDupL = 0;
     uint32_t txfWinFree = 0, txfWinFail = 0, txfBad = 0;   // TX failure watchdog (level >= 3), 5 s windows
     volatile bool ethStalled = false;        // the Ethernet output queue is stalled on a full TX pool (under txLock)
     uint32_t ethStallMs = 0;

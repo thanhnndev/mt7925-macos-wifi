@@ -1154,6 +1154,15 @@ bool itlmt7925::m3RxData(const uint8_t *p, uint32_t len)
             }
             return true;
         }
+        if (!group && !reorder && m3linkUp) {
+            // Retry bit + the sequence number of the previous frame of this TID = the AP resent an MPDU we already delivered
+            // (its ACK was lost). A frame without the Retry bit is always new, so an AP restart cannot be mistaken for one.
+            const uint8_t di = qos ? tid : 8;
+            const bool seen = (rxLastValid >> di) & 1;
+            if ((fc1 & 0x08) && seen && rxLastSn[di] == sn) { stRxDupL++; return true; }
+            rxLastSn[di] = sn;
+            rxLastValid |= (uint16_t)(1u << di);
+        }
         static const uint8_t llc[6] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00};
         for (uint32_t g = 0; g <= 12 && off + hl + g + 8 <= len; g++) {
             const uint8_t *l = p + off + hl + g;
@@ -1465,6 +1474,8 @@ void itlmt7925::m3Link()
     if (!nativeMode) ethLink(true);
     baReset();
     txSn = 0;
+    rxLastValid = 0;
+    stRxDupL = 0;
     stRxUni = stTxUni = 0;
     stAmsduPkt = stAmsduSub = stAmsduBad = 0;
     txfWinFree = stTxFree;

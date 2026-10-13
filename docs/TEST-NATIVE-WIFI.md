@@ -550,3 +550,50 @@ reported. `set4wayHsTimeout` only arms for EAP joins.
    `S:212`, then `I:1c6 up=1`, `I:1bc`, `I:1b2`, and no `I:1a9` from the family (only on a real disconnect).
 2. Settings > Wi-Fi shows the network connected; `airportd` no longer logs `0xe0822403` for SSID.
 3. If the link is still left, the recorder's next `I:` after `I:1cc` names the new blocker.
+
+## Round 20 result and round 21 (speed, duplicates, op mode, `itlmt_fast=6`)
+
+### Round 20 result (boot with native bdef5ce0, core 71256f98, user joined from Settings)
+
+* The whole family chain ran and stayed: `P:d8`, `I:1b1`, `I:1cc`, `I:1c6`, `I:1f6`, `I:1b2`, `I:1bb`, `I:1bc`; no `I:1a9` from the
+  family. Core `wifi-state` = connected, en4 active with a DHCP address, `system_profiler SPAirPortDataType` reports
+  Status Connected, channel 44, WPA2 Personal, 802.11ac, rate 54.
+* `networksetup -getairportnetwork en4` still prints "not associated": the macOS 14+ redaction without Location permission, not a
+  driver state (the profiler and the core agree).
+* Defect found: "Network Type: Computer to Computer Network". `getOP_MODE` answered mode 2 and `APPLE80211_M_STA` is 1 (2 is
+  IBSS, `apple80211_var.h`); the earlier comment that 2 = station was wrong. Fixed in round 21.
+* Still prohibited and seen: 0x39 (x11), 0x161, 0x22d, 0x55, 0xc0, 0xbf, 0x1a8 - none stopped the join.
+
+### Speed (round 20, legacy 6 Mb/s TX path, single run, not a LAN iperf)
+
+Cloudflare WARP was running, and its policy refuses any TCP socket bound to en4 locally (zero packets on en4, refused in 2 ms), so
+curl `--interface en4` cannot measure it. Apple's `networkQuality -I en4` does work:
+
+| | round 20 baseline |
+|---|---|
+| uplink / downlink capacity | 15.4 / 8.8 Mb/s |
+| idle latency | 62 ms (gateway ping 2.3-11 ms, 0 % loss) |
+| responsiveness under load | 530 ms up / 810 ms down (poor: queueing + retries) |
+| duplicates | +8 duplicate ICMP replies in 30 (AP retries delivered twice) |
+
+### Round 21 change
+
+* Core (`itlmt7925_m3.cpp`): 802.11 duplicate drop for unicast data outside a Block Ack window: Retry bit set and the sequence
+  number equals the previous frame of that TID (index 8 = non-QoS) -> dropped, counted in `stRxDupL`. Frames without the Retry bit
+  are never dropped, so an AP restart cannot be mistaken for a duplicate. A-MSDU subframes and the reorder path are untouched.
+* Native: `getOP_MODE` answers `APPLE80211_M_STA` (1). A link the core restores by itself (fast-mode ladder step, AP drop and
+  supervisor rejoin) is announced to the family again with the join sequence (`wcl:link restored by core, announcing again`),
+  because the family had been told the link went down and would stay LINK_DOWN while data flowed.
+* Boot-arg `itlmt_fast=6` added to `config.plist` (backup `config.plist.round21-pre`): HT/VHT rates, Block Ack, A-MSDU RX,
+  160 MHz, HE; the core steps down by itself on failure down to the legacy path (verified earlier on this machine on the
+  non-native path: 1.5-1.7 MB/s up, about 5.4 MB/s down over the internet, [WIFI.md](WIFI.md)).
+* Undo: `occonfig.py args del itlmt_fast` (or restore `config.plist.round21-pre`);
+  `build/esp-backup-native-round20-pre.kext` (bdef5ce0...) and `build/esp-backup-core-round20-pre.kext` (71256f98...).
+
+### One reboot, read in this order
+
+1. `ioreg -l -w0 | grep -E '"m3-log"|wifi-state|wifi-events'`: want `fast: on lvl=6` (or the highest level the ladder keeps),
+   `lvl N bw M` in `wifi-events`.
+2. `system_profiler SPAirPortDataType`: Network Type Infrastructure, PHY mode / rate higher than 54.
+3. `networkQuality -I en4` against the round-20 baseline above (turn the USB tether and WARP off for a TCP test with curl).
+4. `ioreg ... itlmt_native_calls`: a `P:d8` pair after a ladder step-down means the re-announce path ran.

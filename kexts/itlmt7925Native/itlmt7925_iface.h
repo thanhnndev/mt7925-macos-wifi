@@ -96,6 +96,8 @@ private:
              extBssTraced = 0, fastLaneTraced = 0;
     // the family's link state as the driver told it (event 0xd8): set when the join completes, cleared on a link loss
     bool nmLinkUp = false, linkDownPending = false;
+    bool nmEverJoined = false;              // a join of the family's asking completed: the core may later restore the link by itself
+    uint32_t reannounceTicks = 0, reannounceTraced = 0;
     uint8_t nmBssid[6] = {};
     uint8_t scanSsidLen = 0;
     char scanSsid[32] = {};
