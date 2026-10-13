@@ -17,6 +17,7 @@
 #include "itlmt7925_iface.h"
 
 #include <IOKit/IOLib.h>
+#include <IOKit/network/IONetworkMedium.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ class itlmt7925Wifi : public IO80211Controller {
 public:
     bool init(OSDictionary *properties = nullptr) override;
     bool start(IOService *provider) override;
+    IOReturn selectMedium(const IONetworkMedium *medium) override;
     void stop(IOService *provider) override;
     void free() override;
 
@@ -194,6 +196,21 @@ bool itlmt7925Wifi::start(IOService *provider)
     }
     PE_parse_boot_argn("itlmt_native_wl", &wlMode, sizeof(wlMode));
     started = true;
+    // Round 12: the inherited Skywalk media getter reads our dictionary;
+    // a missing dictionary is converted to EIO by ioctl_gifmedia.
+    // Advertise automatic Wi-Fi selection, without claiming a radio link.
+    OSDictionary *media = OSDictionary::withCapacity(1);
+    IONetworkMedium *automatic = IONetworkMedium::medium(kIOMediumIEEE80211Auto, 0);
+    bool mediaOK = media && automatic && IONetworkMedium::addMedium(media, automatic)
+        && publishMediumDictionary(media) && setSelectedMedium(automatic);
+    if (automatic) automatic->release();
+    if (media) media->release();
+    itlmtTrace(this, "ctl:media auto=%u", mediaOK);
+    if (!mediaOK) {
+        IOLog(LOGT "media publication failed, controller only\n");
+        registerService();
+        return true;
+    }
     registerService();
     uint32_t withIf = 0;
     if (PE_parse_boot_argn("itlmt_native_if", &withIf, sizeof(withIf)) && withIf) {
@@ -210,6 +227,13 @@ bool itlmt7925Wifi::start(IOService *provider)
 }
 
 // The core driver's Ethernet front end publishes IOMACAddress on itself (IOEthernetController::start); it is a child of the core.
+IOReturn itlmt7925Wifi::selectMedium(const IONetworkMedium *medium)
+{
+    if (!medium || medium->getType() != kIOMediumIEEE80211Auto)
+        return kIOReturnUnsupported;
+    return setSelectedMedium(medium) ? kIOReturnSuccess : kIOReturnError;
+}
+
 static bool findMac(IOService *provider, uint8_t out[6])
 {
     bool found = false;
