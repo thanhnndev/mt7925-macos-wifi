@@ -23,7 +23,9 @@ PURE = re.compile(r'/\*\s*(\d+)\s*\*/\s*virtual\s+(\S+)\s+(\w+)\((.*?)\)\s*=\s*0
 # Apple's AppleBCMWLANCore handlers (itlmt7925_iface.cpp, "IO80211InfraProtocol handlers with layouts taken from Apple's ...")
 CUSTOM = {'setMacAddress', 'getCHANNEL', 'getPOWERSAVE', 'getRATE', 'getOP_MODE', 'getRSSI', 'setUSB_HOST_NOTIFICATION',
           'setOS_FEATURE_FLAGS', 'setINFRA_ENUMERATED', 'getSUPPORTED_CHANNELS', 'getHW_SUPPORTED_CHANNELS', 'getWCL_BSS_INFO',
-          'setWCL_SCAN_REQ', 'setWCL_SCAN_ABORT', 'setWCL_ASSOCIATE', 'setWCL_LEAVE_NETWORK', 'setWCL_JOIN_ABORT'}
+          'setWCL_SCAN_REQ', 'setWCL_SCAN_ABORT', 'setWCL_ASSOCIATE', 'setWCL_LEAVE_NETWORK', 'setWCL_JOIN_ABORT',
+          'getWCL_LOW_LATENCY_INFO', 'setWCL_SET_SCAN_HOME_AWAY_TIME', 'setWCL_WNM_OPS', 'setWCL_TRIGGER_CC',
+          'setWCL_LINK_UP_DONE', 'setWCL_LINK_STATE_UPDATE'}
 
 
 def pure_slots():

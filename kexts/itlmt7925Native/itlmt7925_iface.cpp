@@ -598,10 +598,12 @@ IOReturn itlmt7925WifiInterface::setMacAddress(ether_addr &address)
     IOEthernetAddress current = {};
     if (!ctl || ctl->getHardwareAddress(&current) != kIOReturnSuccess) return kIOReturnNotReady;
     bool same = memcmp(&address, &current, 6) == 0;
-    itlmtTrace(ctl, "if:setMacAddress %s", same ? "station identity unchanged" : "change unsupported");
+    itlmtTrace(ctl, "if:setMacAddress %s", same ? "station identity unchanged" : "change refused");
     // Initial MAC is already scheduled into core firmware setup. Do not falsely
     // accept a new address without rebuilding firmware device/BSS configuration.
-    return same ? kIOReturnSuccess : kIOReturnUnsupported;
+    // WCLJoinManager issues this (ioctl 0x170) before every join and tolerates success and kIOReturnNotPermitted (a private
+    // address that is not applied) but not other codes, so a refusal is NotPermitted.
+    return same ? kIOReturnSuccess : kIOReturnNotPermitted;
 }
 
 void itlmt7925WifiInterface::setInterfaceEnable(bool enabled)
@@ -839,7 +841,7 @@ IOReturn itlmt7925WifiInterface::getCHANNEL(apple80211_channel_data *d)
     itlmtCall(ctl, 'S', 467);
     if (!d) return kIOReturnBadArgument;
     ItlNativeStatus st;
-    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP || !st.channel) return kNoChannel;
+    if (!queryStatus(&st) || st.state != ITL_NATIVE_UP || !st.channel) return kNoChannel;
     store<uint32_t>(d, 0, 1);
     store<uint32_t>(d, 4, 1);
     store<uint32_t>(d, 8, st.channel);
@@ -862,7 +864,7 @@ IOReturn itlmt7925WifiInterface::getRATE(apple80211_rate_data *d)
     itlmtCall(ctl, 'S', 470);
     if (!d) return kIOReturnBadArgument;
     ItlNativeStatus st;
-    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP) return kNotAssociated;
+    if (!queryStatus(&st) || st.state != ITL_NATIVE_UP) return kNotAssociated;
     store<uint32_t>(d, 8, st.rateMbps);
     return kIOReturnSuccess;
 }
@@ -874,7 +876,7 @@ IOReturn itlmt7925WifiInterface::getOP_MODE(apple80211_opmode_data *d)
     itlmtCall(ctl, 'S', 471);
     if (!d) return (IOReturn)0x16;
     ItlNativeStatus st;
-    bool assoc = linkUp() && queryStatus(&st) && st.state == ITL_NATIVE_UP;
+    bool assoc = queryStatus(&st) && st.state == ITL_NATIVE_UP;
     store<uint32_t>(d, 0, 1);
     store<uint32_t>(d, 4, assoc ? 2u : 0u);
     return kIOReturnSuccess;
@@ -887,7 +889,7 @@ IOReturn itlmt7925WifiInterface::getRSSI(apple80211_rssi_data *d)
     itlmtCall(ctl, 'S', 472);
     if (!d) return kIOReturnBadArgument;
     ItlNativeStatus st;
-    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP) return kNotAssociated;
+    if (!queryStatus(&st) || st.state != ITL_NATIVE_UP) return kNotAssociated;
     bzero((uint8_t *)d + 4, 0x30);
     store<uint32_t>(d, 0, 1);
     if (st.rssi) {
@@ -937,7 +939,8 @@ IOReturn itlmt7925WifiInterface::setINFRA_ENUMERATED(apple80211_infra_enumerated
 // Not determined (left zero): noise at +0x34, the u8 flag and +0xc/+0x10 words of 0xd3, the aux words, status values on failure.
 namespace {
 const uint32_t kBeaconHeader = 0x40;
-const uint32_t kEventScanResult = 0xc9, kEventScanDone = 0xed, kEventAssoc = 0x4e, kEventJoin = 0xd3, kEventConnect = 0xd5;
+const uint32_t kEventScanResult = 0xc9, kEventScanDone = 0xed, kEventAssoc = 0x4e, kEventJoin = 0xd3, kEventFirstBeacon = 0xd4,
+               kEventConnect = 0xd5;
 // 20 MHz channels the core's scan covers (itlmt7925_m2.cpp): the only channels a result can come from.
 const uint8_t kScanChannels[] = {1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161, 165};
 const uint32_t kScanTimeoutTicks = 2500;       // 25 s at the 10 ms tick: the core blocks up to 15 s per scan
@@ -1103,6 +1106,72 @@ IOReturn itlmt7925WifiInterface::setWCL_JOIN_ABORT(void *)
     return kIOReturnSuccess;
 }
 
+// ---- the rest of the join sequence the family's WCL layer drives (WCLJoinManager / WCLNetManager, 24H32) -----------------------
+//
+// WCLJoinManager::handleJoinRequest (0xffffff800220ac36) starts every join with a GET of 0x1ab WCL_LOW_LATENCY_INFO into a
+// 4-byte buffer and aborts the join (setAssociateRequest fails) when the call fails or the dword is nonzero. Zero = no
+// low-latency session is active, which is the only state this driver has. A null buffer is kIOReturnError (0xe00002bc).
+IOReturn itlmt7925WifiInterface::getWCL_LOW_LATENCY_INFO(apple80211_low_latency_info *d)
+{
+    itlmtCall(ctl, 'S', 521);
+    if (!d) return kIOReturnError;
+    store<uint32_t>(d, 0, 0);
+    return kIOReturnSuccess;
+}
+
+// 0x1be: WCL tells the driver how long to stay on the home channel and away between scan channels. The core's scan has its own
+// fixed dwell; the request is accepted and its first dword traced (the layout is not otherwise determined).
+IOReturn itlmt7925WifiInterface::setWCL_SET_SCAN_HOME_AWAY_TIME(scanHomeAndAwayTime *d)
+{
+    itlmtCall(ctl, 'S', 598);
+    if (!d) return kIOReturnBadArgument;
+    uint32_t w0 = 0, w1 = 0;
+    memcpy(&w0, d, 4);
+    memcpy(&w1, (const uint8_t *)d + 4, 4);
+    if (homeAwayTraced++ < 4) itlmtTrace(ctl, "wcl:home/away words %x %x", w0, w1);
+    return kIOReturnSuccess;
+}
+
+// 0x1eb WNM_OPS: BSS-transition / DMS configuration. No WNM feature is offered by the core, so nothing is configured.
+IOReturn itlmt7925WifiInterface::setWCL_WNM_OPS(apple80211_wcl_wnm_config_t *d)
+{
+    itlmtCall(ctl, 'S', 620);
+    if (!d) return kIOReturnError;
+    return kIOReturnSuccess;
+}
+
+// 0x1b7 TRIGGER_CC: WCL asks the driver to re-run its country-code step after a failed join (the abort path of
+// handleSendCandidateToDriver). The core's regulatory domain is fixed, so there is nothing to re-run.
+IOReturn itlmt7925WifiInterface::setWCL_TRIGGER_CC(triggerCC *)
+{
+    itlmtCall(ctl, 'S', 593);
+    return kIOReturnSuccess;
+}
+
+// 0x1bc LINK_UP_DONE: WCLNetManager::linkUp tells the driver the family finished its link-up work (BSS manager, neighbor
+// cache, link-change event). Apple's driver uses it to start its own post-link services; the core has none to start.
+IOReturn itlmt7925WifiInterface::setWCL_LINK_UP_DONE(void *)
+{
+    itlmtCall(ctl, 'S', 597);
+    if (linkUpDoneTraced++ < 4) itlmtTrace(ctl, "wcl:link up done");
+    return kIOReturnSuccess;
+}
+
+// 0x1c6 LINK_STATE_UPDATE (apple80211_wcl_update_link_state): +0 ether_addr bssid, +6 u8 link up, +7/+8 flags, +0xc u32 down
+// reason. In Apple's driver it drives AppleBCMWLANNetAdapter::setLinkUp / setLinkDown. The core's link state already follows its
+// own association (linkFromCore -> applyRadioLink), so this is accepted and recorded; the values are traced for the next round.
+IOReturn itlmt7925WifiInterface::setWCL_LINK_STATE_UPDATE(apple80211_wcl_update_link_state *d)
+{
+    itlmtCall(ctl, 'S', 600);
+    if (!d) return kIOReturnBadArgument;
+    const uint8_t *b = (const uint8_t *)d;
+    uint32_t reason = 0;
+    memcpy(&reason, b + 0xc, 4);
+    if (linkStateTraced++ < 8)
+        itlmtTrace(ctl, "wcl:link state up=%u flags=%u/%u reason=%u radio=%u", b[6], b[7], b[8], reason, linkUp());
+    return kIOReturnSuccess;
+}
+
 // The current BSS as a beacon message (AppleBCMWLANCore::getWCL_BSS_INFO builds it from the firmware's BSS info;
 // 0xe00002bc while not associated). Here the core's target AP (captured from its beacon / probe response).
 IOReturn itlmt7925WifiInterface::getWCL_BSS_INFO(apple80211_beacon_msg *d)
@@ -1110,7 +1179,7 @@ IOReturn itlmt7925WifiInterface::getWCL_BSS_INFO(apple80211_beacon_msg *d)
     itlmtCall(ctl, 'S', 522);
     if (!d) return kIOReturnBadArgument;
     ItlNativeStatus st;
-    if (!linkUp() || !queryStatus(&st) || st.state != ITL_NATIVE_UP) return kIOReturnError;
+    if (!queryStatus(&st) || st.state != ITL_NATIVE_UP) return kIOReturnError;
     buildBeacon((uint8_t *)d, st.bssid, st.channel, st.ssid, st.ssidLen, st.rssi, st.capability, st.beaconInterval, st.ie,
                 st.ieLen, false);
     return kIOReturnSuccess;
@@ -1160,6 +1229,13 @@ void itlmt7925WifiInterface::finishJoin(const ItlNativeStatus &st, bool ok)
     store<uint32_t>(join, 0x14, assoc[0]);
     postEvent(kEventJoin, join, sizeof(join));
     if (ok) {
+        // apple80211_first_beacon_event (WCLJoinManager::firstBeaconEventHandler wants exactly 0x14 bytes;
+        // WCLJoinRequest::updateFirstBeaconEvent): u16 status, u16 ieee status (both 0 = success), +4 ether_addr compared
+        // with the candidate's, +0xc a u64 kept with the candidate (not determined, left zero).
+        uint8_t first[0x14];
+        bzero(first, sizeof(first));
+        memcpy(first + 4, st.bssid, 6);
+        postEvent(kEventFirstBeacon, first, sizeof(first));
         uint8_t done[0xa4];
         bzero(done, sizeof(done));
         memcpy(done + 4, st.bssid, 6);

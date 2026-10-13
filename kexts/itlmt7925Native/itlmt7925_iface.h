@@ -91,6 +91,7 @@ private:
     ItlNativeAp *snap = nullptr;            // ITL_NATIVE_AP_MAX entries: scratch for ITL_NATIVE_NETS (tick thread only)
     bool scanActive = false, scanImmediate = false, joinActive = false;
     uint32_t scanGenAtReq = 0, scanTicks = 0, joinSeq = 0, joinTicks = 0, controlTicks = 0, scanTraced = 0;
+    uint32_t homeAwayTraced = 0, linkUpDoneTraced = 0, linkStateTraced = 0;
     uint8_t scanSsidLen = 0;
     char scanSsid[32] = {};
     uint64_t osFeatureFlags = 0;            // setOS_FEATURE_FLAGS payload (qword at +0), kept as Apple's core does

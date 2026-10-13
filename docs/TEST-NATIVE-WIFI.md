@@ -347,3 +347,65 @@ Both kexts build; `check_kext_links.py` only the 6 baseline-missing symbols (pos
    (0x4e/0xd3/0xd5).
 3. `itlmt_native_trace`: `scan:` and `assoc:` lines (fail stage when a join fails), `wifi-events` in the core log.
 4. Join a WPA2-PSK network from Settings; `ifconfig` for the BSD interface and DHCP.
+
+## Join sequence fix (round 16)
+
+### Result of the 4b9273b boot (user report + log)
+
+Settings listed the scanned networks; joining failed immediately. `setAssociateRequest` returned 58 (`kProhibited`): the family's
+`WCLJoinManager::handleJoinRequest` (0xffffff800220ac36) begins every join with an internal GET of ioctl 0x1ab
+`WCL_LOW_LATENCY_INFO` and aborts when it fails or returns a nonzero dword. `isCommandProhibited` refused 0x1ab (not in
+`commandAllowed()`), so the join never reached 0x1ba ASSOCIATE.
+
+### What changed (itlmt7925Native only; core kext unchanged)
+
+* `commandAllowed()`: + 0x170 SET_MAC_ADDRESS, 0x1ab LOW_LATENCY_INFO, 0x1be SET_SCAN_HOME_AWAY_TIME, 0x1b7 TRIGGER_CC.
+  The recorded-ioctl list holds 96 distinct ids (was 32).
+* Handlers: `getWCL_LOW_LATENCY_INFO` (one zero dword), `setWCL_SET_SCAN_HOME_AWAY_TIME` (accepted, first two words traced),
+  `setWCL_WNM_OPS`, `setWCL_TRIGGER_CC`, `setWCL_LINK_UP_DONE` (accepted), `setWCL_LINK_STATE_UPDATE` (accepted; bssid/up/flags/reason
+  traced as `wcl:link state ...`). `setMacAddress` answers `kIOReturnNotPermitted` for a different address (the join manager
+  tolerates 0 and 0xe00002e2 only).
+* Event 0xd4 (first beacon, exactly 0x14 bytes: u16 status 0, u16 ieee status 0, +4 bssid, +0xc u64 zero) is posted between 0xd3
+  and 0xd5 (`WCLJoinManager::firstBeaconEventHandler`, `WCLJoinRequest::updateFirstBeaconEvent`).
+* `getCHANNEL/RATE/RSSI/WCL_BSS_INFO` use the core's association state only (no longer also the family-visible radio link, which
+  can lag by one tick when WCLNetManager::linkUp asks for BSS info right after 0xd5).
+
+### Not needed from the driver (read from the disassembly)
+
+The family's `WCLNetManager::linkUp` -> `updateBss` -> `WCLBssManager::setCurrentBSS(WCLBSSBeacon*)` sets the current BSS from the
+join candidate, so SSID/BSSID/CHANNEL come from the family once 0xd3/0xd4/0xd5 arrive; the driver does not build a
+`IO80211BSSBeacon`. `linkUp` also issues a GET 0x1b2 TRAFFIC_COUNTERS (0x38 bytes) whose result it does not check; 0x1b2 is still
+refused (layout not determined).
+
+### Checks (host-only)
+
+Both kexts build; `check_kext_links.py` only the 6 baseline-missing symbols; `check_native_slots.py` interface 215/0;
+`gen_native_iface.py --check` ok.
+
+### One reboot, read in this order
+
+1. Join a WPA2-PSK network from Settings. `bash scripts/native-wifi-test.sh logs`.
+2. `itlmt_native_trace`: `ioctl:cmd=1ab/170/1ba allowed`, `assoc:request`, `assoc:result ok=1`, `wcl:link state up=...`,
+   `wcl:link up done`, `if:setMacAddress ...`.
+3. `itlmt_native_calls`: `S:595` ASSOCIATE, `P:78/211/212/213` posted events, `S:600` LINK_STATE_UPDATE, `S:597` LINK_UP_DONE,
+   which `I:` ids appear next (SSID/BSSID are family-answered; look for 0x1b2, 0x1b8 and any still-refused id).
+4. `ifconfig` for the BSD interface and DHCP; System Settings shows the joined name.
+
+### Result of the round-16 boot (2026-10-13)
+
+* The password prompt in Settings no longer reports an error (round 15: `setAssociateRequest` = 58 right after the prompt).
+* The captured window (boot 16:26 to 16:51, `log show` + ioreg) contains **no join request at all**: no `APPLE80211_IOC_WCL_ASSOCIATE`,
+  no GET 0x1ab / SET 0x170 / 0x1ba, no `assoc:request` in `itlmt_native_trace`; airportd logged only auto-join scans (known
+  networks all "unused for 72 weeks", so auto-join never targets one). So the join attempt was not inside the capture; no verdict on
+  the join FSM or on data yet.
+* Still failing on every cycle, all family-visible: GET SSID/BSSID/RSSI/RATE/NOISE `0xe0822403` (no association, expected), CHANNEL
+  `0xe0822801`, CHANNELS_INFO (0xcf) `0xe00002c7` (about 500 calls), MCS and NSS `0x3a` (prohibited, not in `commandAllowed()`),
+  BTCOEX_PROFILE `0xe00002c7` x35, ROAM_PROFILE `0xe0822403`, SET IE (0x55) `0x3a`, POWERSAVE `0xe00002c7`.
+* `itlmt_tx_*` / `itlmt_rx_*` counters are 0 (no association, so no datapath yet).
+
+### Next capture (no reboot needed: the kext is loaded)
+
+1. Join from Settings, then within a minute: `bash scripts/native-wifi-test.sh logs` (from the worktree path, not the main checkout)
+   or just read `ioreg -l -w0 | grep itlmt_native_trace_tail` and
+   `log show --last 3m --info --debug --predicate 'process == "kernel" AND eventMessage CONTAINS "IOC DEBUG"'`.
+2. Expect `INTERNAL: Set type=<APPLE80211_IOC_WCL_ASSOCIATE>` and the 0x1ab/0x170 GET/SET before it.

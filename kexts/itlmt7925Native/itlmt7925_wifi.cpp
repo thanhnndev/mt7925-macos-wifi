@@ -58,7 +58,7 @@ public:
     using IO80211Controller::newUserClient;
 
 private:
-    uint32_t tracedCommands[32] = {};
+    uint32_t tracedCommands[96] = {};
     uint32_t tracedCommandCount = 0;
     uint32_t rejectedCommands = 0;
     bool capsTraced = false;
@@ -601,6 +601,11 @@ IO80211FaultReporter *itlmt7925Wifi::getFaultReporterFromDriver()
 // 0x3 CIPHER_KEY, 0x7 TXPOWER, 0x1c LOCALE, 0xcf CHANNELS_INFO, 0xd8 ROAM_PROFILE, 0xff BTCOEX_PROFILE, 0x103 MAX_NSS_FOR_AP,
 // 0x17b COUNTRY_CHANNELS_INFO, 0x1aa REASSOC, 0x1bc LINK_UP_DONE, 0x1c1 WCL_CHANNELS_INFO, 0x1c6 LINK_STATE_UPDATE,
 // 0x1cc WCL_EXTENDED_BSS_INFO, 0x1eb WNM_OPS, 0x216 PLATFORM_CONFIG.
+//
+// Round 16 (the boot after 4b9273b: scan listed networks, a join aborted with 58): WCLJoinManager::handleJoinRequest asks the
+// driver for 0x1ab WCL_LOW_LATENCY_INFO before anything else and aborts on a nonzero answer; the rest of its sequence is
+// 0x170 SET_MAC_ADDRESS, 0x1ba ASSOCIATE (1b6 JOIN_ABORT / 1b7 TRIGGER_CC on the abort path), and the link-up path then sends
+// 0x1bc LINK_UP_DONE, 0x1c6 LINK_STATE_UPDATE and 0x1be SET_SCAN_HOME_AWAY_TIME. All of them have handlers now.
 static bool commandAllowed(int cmd)
 {
     switch (cmd) {
@@ -609,6 +614,7 @@ static bool commandAllowed(int cmd)
     case 0x1b: case 0xfe: case 0x1b9: case 0x1b3: case 0x1ba: case 0x1b6: case 0x1a9: case 0x1b1:
     case 0x03: case 0x07: case 0x1c: case 0xcf: case 0xd8: case 0xff: case 0x103: case 0x17b: case 0x1aa: case 0x1bc:
     case 0x1c1: case 0x1c6: case 0x1cc: case 0x1eb: case 0x216:
+    case 0x170: case 0x1ab: case 0x1be: case 0x1b7:
         return true;
     default:
         return false;
@@ -623,7 +629,7 @@ IOReturn itlmt7925Wifi::isCommandProhibited(int cmd)
     itlmtCall(this, 'I', (uint32_t)cmd, callers);
     bool seen = false;
     for (uint32_t n = 0; n < tracedCommandCount; n++) if (tracedCommands[n] == (uint32_t)cmd) seen = true;
-    if (!seen && tracedCommandCount < 32) {
+    if (!seen && tracedCommandCount < 96) {
         tracedCommands[tracedCommandCount++] = (uint32_t)cmd;
         itlmtTrace(this, "ioctl:cmd=%x %s", cmd, commandAllowed(cmd) ? "allowed" : "prohibited");
     }
