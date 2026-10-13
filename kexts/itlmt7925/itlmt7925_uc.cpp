@@ -332,6 +332,37 @@ void itlmt7925::nativeStatus(ItlNativeStatus *s)
     uint32_t il = tgtIeLen < sizeof(tgtIe) ? tgtIeLen : (uint32_t)sizeof(tgtIe);
     s->ieLen = ieWhole(tgtIe, il, ITL_NATIVE_IE_MAX);
     memcpy(s->ie, tgtIe, s->ieLen);
+    // negotiated sets (apCaps is parsed when the fast plan is made, itlmt7925_m3.cpp m3FastPlan)
+    s->fastActive = (fastActive && m3linkUp) ? 1 : 0;
+    s->fastNss = 0;
+    s->fastHe = 0;
+    s->fastBw = 0;
+    bzero(s->htMcs, sizeof(s->htMcs));
+    s->vhtMcs = s->heMcs = 0xffff;
+    if (s->fastActive) {
+        const uint8_t nss = fastNss > ITL_CAPS_MAX_NSS ? (uint8_t)ITL_CAPS_MAX_NSS : fastNss;
+        s->fastNss = nss;
+        s->fastHe = fastHe ? 1 : 0;
+        s->fastBw = fastBw;
+        if (apCaps.ht)
+            for (uint8_t i = 0; i < nss && i < 10; i++) s->htMcs[i] = apCaps.mcsRx[i];
+        if (apCaps.vht) {
+            uint16_t m = 0xffff;
+            for (uint8_t ss = 0; ss < nss; ss++) {
+                const uint16_t v = (apCaps.vhtRxMcs >> (2 * ss)) & 3;
+                m = (uint16_t)((m & ~(3u << (2 * ss))) | (v << (2 * ss)));
+            }
+            s->vhtMcs = m;
+        }
+        if (fastHe && apCaps.he) {
+            uint16_t m = 0xffff;
+            for (uint8_t ss = 0; ss < nss; ss++) {
+                const uint16_t v = (apCaps.heRx80 >> (2 * ss)) & 3;
+                m = (uint16_t)((m & ~(3u << (2 * ss))) | (v << (2 * ss)));
+            }
+            s->heMcs = m;
+        }
+    }
 }
 
 void itlmt7925::nativeNets(ItlNativeNets *out)

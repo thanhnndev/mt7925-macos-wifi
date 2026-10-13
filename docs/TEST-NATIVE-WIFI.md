@@ -597,3 +597,35 @@ curl `--interface en4` cannot measure it. Apple's `networkQuality -I en4` does w
 2. `system_profiler SPAirPortDataType`: Network Type Infrastructure, PHY mode / rate higher than 54.
 3. `networkQuality -I en4` against the round-20 baseline above (turn the USB tether and WARP off for a TCP test with curl).
 4. `ioreg ... itlmt_native_calls`: a `P:d8` pair after a ladder step-down means the re-announce path ran.
+
+## Round 22 (2026-10-13): firmware MAC, rate / MCS / IE content in GET 0x1cc
+
+### Change
+
+* Core (`itlmt7925_m2.cpp`): in native mode the firmware MAC is published as `IOMACAddress` when it is usable (read, not all zero,
+  unicast); otherwise the previous locally-administered placeholder is kept. `itlmt_mac_source` = `firmware` | `placeholder` says which.
+  The MAC value is not written to this repository.
+* Native (`itlmt7925_wifi.cpp` `findMac`): reads the provider's `IOMACAddress` first, then falls back to the old registry scan.
+* Bridge (`itl_native_bridge.h`, `ItlNativeStatus`): negotiated rate plan appended: `fastActive`, `fastNss`, `fastHe`, `fastBw`,
+  `htMcs[10]`, `vhtMcs`, `heMcs` (IEEE 2-bit-per-stream maps, 0xffff = none), filled from the core `apCaps` in `itlmt7925_uc.cpp`.
+* Native `getWCL_EXTENDED_BSS_INFO` (slot 530, GET 0x1cc, 0x1e0 bytes) no longer answers empty. Layout from
+  `AppleBCMWLANNetAdapter::getExtendedBssInfo` and its helpers (24H32): rate set at +0 (count u16 at +4, entries of 12 bytes from
+  +8: version, Mb/s = (byte>>1)&0x3f, basic = byte>>7), HT MCS bytes at +0xc0, VHT map u16 at +0xd0, HE map u16 at +0xd8,
+  MLO flag +0xdc = 0, raw RSN (else WPA) element at +0xdd up to 0x101 bytes. Rates come from the AP Supported / Extended Supported
+  Rates, MCS maps from the core plan; on the legacy 6 Mb/s path the VHT/HE maps are 0xffff. The version dwords the caller set
+  are preserved. Trace line: `wcl:extended bss info rates=N rsn=N fast=N nss=N ht=.. vht=.. he=..` (first 4 calls).
+* Not changed: default route / service order is a system setting (Settings > Network > ... > Set Service Order), not the driver.
+
+### Install (ESP, verified byte for byte)
+
+* Backups first: `build/esp-backup-native-round21-pre.kext` (e272ed83...) and `build/esp-backup-core-round21-pre.kext` (29527e9a...).
+* Installed: native 45841ffb..., core de80ffa7..., boot-args unchanged (`itlmt_fast=6`, `itlmt_native_nvtrace=1`).
+* Undo: copy the two backup kexts back over `/Volumes/ESP/EFI/OC/Kexts/itlmt7925Native.kext` and `itlmt7925.kext`.
+
+### One reboot, read in this order
+
+1. `ioreg -l -w0 | grep -E "itlmt_mac_source|IOMACAddress"`: `firmware` expected; if `placeholder`, `m2-log` says why the read was unusable.
+2. `ioreg -l -w0 | grep -E "itlmt_native_trace_tail"`: the `wcl:extended bss info rates=` line, rsn nonzero for a WPA2 network.
+3. `system_profiler SPAirPortDataType`: the interface address is the firmware MAC, rate / PHY higher than 54 if `fast: on`.
+4. `networkQuality -I en4` against the round-20 baseline (15.4 / 8.8 Mb/s); `m3-log` for `fast: on lvl=` and `stRxDupL`.
+5. `route -n get default`: still `en1` until the service order is changed by the user.

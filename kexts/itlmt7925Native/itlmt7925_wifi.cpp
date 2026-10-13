@@ -285,6 +285,13 @@ IOReturn itlmt7925Wifi::getHardwareAddress(IOEthernetAddress *address)
 static bool findMac(IOService *provider, uint8_t out[6])
 {
     bool found = false;
+    // the core publishes the station address on itself in native mode (itlmt7925_m2.cpp)
+    if (OSData *d = OSDynamicCast(OSData, provider->getProperty("IOMACAddress"))) {
+        if (d->getLength() == 6) {
+            memcpy(out, d->getBytesNoCopy(), 6);
+            return true;
+        }
+    }
     if (IORegistryIterator *it = IORegistryIterator::iterateOver(provider, gIOServicePlane)) {
         while (!found) {
             IORegistryEntry *e = it->getNextObject();

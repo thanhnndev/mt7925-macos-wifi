@@ -386,11 +386,16 @@ int itlmt7925::m2Run()
               ev[40], ev[41], ev[42], ev[43], ev[44], ev[45], ev[46], ev[47], ev[48], ev[49], ev[50], ev[51], ev[52], ev[53],
               ev[54], ev[55], ev[56], ev[57], ev[58], ev[59], ev[60], ev[61], ev[62], ev[63]);
     if (!gotMac) { static const uint8_t def[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55}; memcpy(mac, def, 6); }
-    // Match the existing Stage B test interface's locally administered identity.
-    // Firmware interface/BSS setup below must use the same station address as en9.
+    // Native interface: the firmware's own address is used when it is a usable unicast one (not zero, not group-addressed), and
+    // it is published as IOMACAddress on this service for the native kext (the Ethernet front end that used to publish it is
+    // disabled in native mode). Otherwise the locally administered placeholder of the earlier stages stays.
     if (nativeMode) {
         static const uint8_t nativeMac[6] = {0x02, 0x00, 0x79, 0x25, 0x00, 0x01};
-        memcpy(mac, nativeMac, 6);
+        const bool zero = !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]);
+        const bool usable = gotMac && !zero && !(mac[0] & 1);
+        if (!usable) memcpy(mac, nativeMac, 6);
+        setProperty("IOMACAddress", mac, 6);
+        setProperty("itlmt_mac_source", usable ? "firmware" : "placeholder");
     }
     m2log("mac=%02x:%02x:%02x:%02x:%02x:%02x%s", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], gotMac ? "" : " (default)");
 

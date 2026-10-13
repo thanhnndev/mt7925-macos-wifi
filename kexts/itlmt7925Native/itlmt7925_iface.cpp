@@ -1192,17 +1192,77 @@ IOReturn itlmt7925WifiInterface::getWCL_BSS_INFO(apple80211_beacon_msg *d)
 }
 
 // 0x1cc WCL_EXTENDED_BSS_INFO (0x1e0 bytes, asked by WCLNetManager::setCurrentBSS right after 0x1b1; any failure there aborts the
-// link-up and the family leaves the network itself - round 19 boot: `I:1b1 I:1cc I:1a9`). Layout from AppleBCMWLANNetAdapter::
-// getExtendedBssInfo (24H32): +0 apple80211_rate_set_data (0xbc), +0xbc mcs index set (16), +0xcc vht mcs set (8), +0xd4 he mcs
-// set (8), +0xdc u8 MLO connection, +0xdd 0x101 bytes of the associated WPA/RSN IEs. The core does not expose negotiated rate or
-// MCS sets and the layouts of the rate/MCS structures and of the IE blob are chưa xác định, so everything is reported empty
-// (no rates, no MCS, no MLO, no IEs).
+// link-up and the family leaves the network itself - round 19 boot: `I:1b1 I:1cc I:1a9`).
+// Layout from AppleBCMWLANNetAdapter::getExtendedBssInfo (0xffffff800155499c, 24H32) and its three helpers:
+//   +0x00 apple80211_rate_set_data (0xbc): u32 version (left as the caller set it), u16 count at +4 (updateRateSetSync maps the
+//         firmware's wl_rateset {u32 count, u8 rates[16]} with mapBcomRatesetToAppleRateset 0xffffff80016522bf: count capped at
+//         16 there, 15 here as the array holds), entry i at +8 + 12 i = {u32 version (left alone), u32 (rate byte >> 1) & 0x3f
+//         = Mb/s, u32 rate byte >> 7 = basic}
+//   +0xbc apple80211_mcs_index_set_data (16): u32 version, +4 up to 10 bytes of the HT RX MCS bitmask (updateMCSSet 0xffffff8001554e72)
+//   +0xcc apple80211_vht_mcs_index_set_data (8): u32 version, +4 u16 map, 2 bits per stream (IEEE VHT-MCS map), 0xffff = none
+//   +0xd4 apple80211_he_mcs_index_set_data (8): u32 version, +4 u16 map, 2 bits per stream (IEEE HE-MCS map), 0xffff = none
+//   +0xdc u8 MLO connection (only written when feature bit 0x73 is set; 0 here)
+//   +0xdd 0x101 bytes: the firmware's "wpaie" iovar output as is (getAssociatedWPARSNIESync 0xffffff8001554ca6; the result is
+//         ignored): the raw WPA/RSN information element, id and length included. Here the AP's RSN element (id 0x30) the join
+//         was made against, else its WPA vendor element, or nothing.
+// Rates come from the AP's Supported Rates / Extended Supported Rates, the MCS sets from the core's negotiated plan (all empty
+// on the legacy 6 Mb/s path, where HT/VHT/HE are not in use).
 IOReturn itlmt7925WifiInterface::getWCL_EXTENDED_BSS_INFO(apple80211_extended_bss_info *d)
 {
     itlmtCall(ctl, 'S', 530);
     if (!d) return kIOReturnError;
+    uint8_t *b = (uint8_t *)d;
+    uint32_t ver[4];
+    static const uint32_t verOff[4] = {0, 0xbc, 0xcc, 0xd4};
+    for (int i = 0; i < 4; i++) memcpy(&ver[i], b + verOff[i], 4);
     bzero(d, 0x1e0);
-    if (extBssTraced++ < 4) itlmtTrace(ctl, "wcl:extended bss info answered (empty)");
+    for (int i = 0; i < 4; i++) memcpy(b + verOff[i], &ver[i], 4);
+
+    ItlNativeStatus st;
+    bool have = queryStatus(&st) && st.state == ITL_NATIVE_UP;
+    uint32_t nrates = 0, rsnLen = 0;
+    if (have) {
+        const uint8_t *ie = st.ie;
+        const uint32_t n = st.ieLen < sizeof(st.ie) ? st.ieLen : (uint32_t)sizeof(st.ie);
+        const uint8_t *wpa = nullptr;
+        uint32_t wpaLen = 0;
+        for (uint32_t p = 0; p + 2 <= n; p += 2 + ie[p + 1]) {
+            const uint8_t id = ie[p], l = ie[p + 1];
+            if (p + 2 + l > n) break;
+            const uint8_t *v = ie + p + 2;
+            if ((id == 1 || id == 50) && nrates < 15) {                              // Supported / Extended Supported Rates
+                for (uint8_t k = 0; k < l && nrates < 15; k++, nrates++) {
+                    const uint8_t r = v[k];
+                    store<uint32_t>(b, 8 + 12 * nrates + 4, (r >> 1) & 0x3f);
+                    store<uint32_t>(b, 8 + 12 * nrates + 8, (uint32_t)(r >> 7));
+                }
+            } else if (id == 0x30 && !rsnLen && l + 2u <= 0x101) {                   // RSN
+                memcpy(b + 0xdd, ie + p, l + 2u);
+                rsnLen = l + 2u;
+            } else if (id == 0xdd && !wpa && l >= 4 && v[0] == 0x00 && v[1] == 0x50 && v[2] == 0xf2 && v[3] == 0x01 &&
+                       l + 2u <= 0x101) {                                            // WPA vendor element
+                wpa = ie + p;
+                wpaLen = l + 2u;
+            }
+        }
+        if (!rsnLen && wpa) {
+            memcpy(b + 0xdd, wpa, wpaLen);
+            rsnLen = wpaLen;
+        }
+        store<uint16_t>(b, 4, (uint16_t)nrates);
+        if (st.fastActive) {
+            memcpy(b + 0xbc + 4, st.htMcs, sizeof(st.htMcs));
+            store<uint16_t>(b, 0xcc + 4, st.vhtMcs);
+            store<uint16_t>(b, 0xd4 + 4, st.heMcs);
+        } else {
+            store<uint16_t>(b, 0xcc + 4, 0xffff);                                    // "none", as Apple's default
+            store<uint16_t>(b, 0xd4 + 4, 0xffff);
+        }
+    }
+    if (extBssTraced++ < 4)
+        itlmtTrace(ctl, "wcl:extended bss info rates=%u rsn=%u fast=%u nss=%u ht=%02x vht=%04x he=%04x", nrates, rsnLen,
+                   have ? st.fastActive : 0, have ? st.fastNss : 0, have ? st.htMcs[0] : 0, have ? st.vhtMcs : 0xffff,
+                   have ? st.heMcs : 0xffff);
     return kIOReturnSuccess;
 }
 

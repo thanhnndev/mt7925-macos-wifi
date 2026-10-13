@@ -81,5 +81,11 @@ struct ItlNativeStatus {
     uint16_t beaconInterval;
     uint16_t ieLen;
     uint8_t ie[ITL_NATIVE_IE_MAX];
+    // Negotiated rates for the current link (appended in round 21; both kexts are built from this header). All zero / 0xffff while
+    // the core runs the legacy 6 Mb/s path. htMcs = RX MCS bitmask bytes 0-9 of the streams in use; vhtMcs / heMcs = 2 bits per
+    // spatial stream (0: MCS 0-7 / 0-7, 1: 0-8 / 0-9, 2: 0-9 / 0-11, 3 or 0xffff: none), the IEEE map format.
+    uint8_t fastActive, fastNss, fastHe, fastBw;
+    uint8_t htMcs[10];
+    uint16_t vhtMcs, heMcs;
 };
 #define ITL_NATIVE_STATUS "itlmt-native-status-v1"
