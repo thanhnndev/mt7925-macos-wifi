@@ -676,6 +676,7 @@ void itlmt7925WifiInterface::linkFromCore(OSObject *owner, bool up, uint64_t spe
     if (!i->rxLock) return;
     IOLockLock(i->rxLock);
     i->radioUp = up; i->radioSpeed = speed;
+    if (!up && i->nmLinkUp) i->linkDownPending = true;      // pollControl tells the family (event 0xd8) from the tick thread
     IOWorkLoop *loop = i->bound ? i->queued : nullptr;
     if (loop) loop->retain();
     IOLockUnlock(i->rxLock);
@@ -943,7 +944,7 @@ IOReturn itlmt7925WifiInterface::setINFRA_ENUMERATED(apple80211_infra_enumerated
 namespace {
 const uint32_t kBeaconHeader = 0x40;
 const uint32_t kEventScanResult = 0xc9, kEventScanDone = 0xed, kEventAssoc = 0x4e, kEventJoin = 0xd3, kEventFirstBeacon = 0xd4,
-               kEventConnect = 0xd5;
+               kEventConnect = 0xd5, kEventLinkStatus = 0xd8;
 // 20 MHz channels the core's scan covers (itlmt7925_m2.cpp): the only channels a result can come from.
 const uint8_t kScanChannels[] = {1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161, 165};
 const uint32_t kScanTimeoutTicks = 2500;       // 25 s at the 10 ms tick: the core blocks up to 15 s per scan
@@ -1185,6 +1186,7 @@ IOReturn itlmt7925WifiInterface::getWCL_BSS_INFO(apple80211_beacon_msg *d)
     if (!queryStatus(&st) || st.state != ITL_NATIVE_UP) return kIOReturnError;
     buildBeacon((uint8_t *)d, st.bssid, st.channel, st.ssid, st.ssidLen, st.rssi, st.capability, st.beaconInterval, st.ie,
                 st.ieLen, false);
+    if (bssInfoTraced++ < 4) itlmtTrace(ctl, "wcl:bss info answered ch=%u ssidLen=%u ie=%u", st.channel, st.ssidLen, st.ieLen);
     return kIOReturnSuccess;
 }
 
@@ -1223,6 +1225,17 @@ void itlmt7925WifiInterface::deliverScanResults()
 // derives from the firmware event are not determined.
 void itlmt7925WifiInterface::finishJoin(const ItlNativeStatus &st, bool ok)
 {
+    // The family's WCLNetManager only leaves LINK_DOWN on a link status indication (0xd8, byte +6 != 0): its LINK_UP event runs
+    // firstLinkUp -> linkUp -> updateBss (GET 0x1b1 WCL_BSS_INFO -> current BSS, which is what GET SSID/BSSID/CHANNEL answer from).
+    // It has to precede the join events: WCLNetManager's CONNECT_COMPLETE (from 0xd5) is only accepted after LINK_UP.
+    if (ok) {
+        IOLockLock(rxLock);
+        memcpy(nmBssid, st.bssid, 6);
+        nmLinkUp = true;
+        linkDownPending = false;
+        IOLockUnlock(rxLock);
+        postLinkStatus(st.bssid, true, 0);
+    }
     uint32_t assoc[2] = {ok ? 0u : 1u, 0};
     postEvent(kEventAssoc, assoc, sizeof(assoc));
     uint8_t join[0x1c];
@@ -1247,13 +1260,33 @@ void itlmt7925WifiInterface::finishJoin(const ItlNativeStatus &st, bool ok)
     itlmtTrace(ctl, "assoc:result ok=%u stage=%u", ok, st.failStage);
 }
 
+// Event 0xd8 (WCLNetManager::linkStatusInd): +0 ether_addr bssid, +6 u8 link up (0 = down), +8 u32 down reason
+// (WCLNetManager::linkDownInd switches on it; 1 is the plain "link lost" answer: no debounce or recreate path, the family just
+// issues its leave-network command, which the driver's 0x1a9 handler turns into a core leave).
+void itlmt7925WifiInterface::postLinkStatus(const uint8_t *bssid, bool up, uint32_t reason)
+{
+    uint8_t p[0x10];
+    bzero(p, sizeof(p));
+    memcpy(p, bssid, 6);
+    p[6] = up ? 1 : 0;
+    if (!up) store<uint32_t>(p, 8, reason);
+    postEvent(kEventLinkStatus, p, sizeof(p));
+    if (linkStatusTraced++ < 8) itlmtTrace(ctl, "wcl:link status posted up=%u reason=%u", up, reason);
+}
+
 // Runs every 10 ms tick on the interface's work queue; asks the core every 100 ms while a scan or join is outstanding.
 void itlmt7925WifiInterface::pollControl()
 {
     if (!bound || !core) return;
     IOLockLock(rxLock);
-    bool sa = scanActive, ja = joinActive, imm = scanImmediate;
+    bool sa = scanActive, ja = joinActive, imm = scanImmediate, down = false;
+    uint8_t downBssid[6];
+    if (linkDownPending) {
+        linkDownPending = false;
+        if (nmLinkUp) { nmLinkUp = false; down = true; memcpy(downBssid, nmBssid, 6); }
+    }
     IOLockUnlock(rxLock);
+    if (down) postLinkStatus(downBssid, false, 1);
     if (!sa && !ja) return;
     bool poll = imm || (++controlTicks % 10) == 0;
     if (!poll) return;

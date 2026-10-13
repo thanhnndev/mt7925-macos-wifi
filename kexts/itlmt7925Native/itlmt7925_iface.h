@@ -86,12 +86,16 @@ private:
     void pollControl();
     void deliverScanResults();
     void finishJoin(const ItlNativeStatus &st, bool ok);
+    void postLinkStatus(const uint8_t *bssid, bool up, uint32_t reason);
     void postEvent(uint32_t code, void *data, size_t length);
     bool queryStatus(ItlNativeStatus *st);
     ItlNativeAp *snap = nullptr;            // ITL_NATIVE_AP_MAX entries: scratch for ITL_NATIVE_NETS (tick thread only)
     bool scanActive = false, scanImmediate = false, joinActive = false;
     uint32_t scanGenAtReq = 0, scanTicks = 0, joinSeq = 0, joinTicks = 0, controlTicks = 0, scanTraced = 0;
-    uint32_t homeAwayTraced = 0, linkUpDoneTraced = 0, linkStateTraced = 0;
+    uint32_t homeAwayTraced = 0, linkUpDoneTraced = 0, linkStateTraced = 0, bssInfoTraced = 0, linkStatusTraced = 0;
+    // the family's link state as the driver told it (event 0xd8): set when the join completes, cleared on a link loss
+    bool nmLinkUp = false, linkDownPending = false;
+    uint8_t nmBssid[6] = {};
     uint8_t scanSsidLen = 0;
     char scanSsid[32] = {};
     uint64_t osFeatureFlags = 0;            // setOS_FEATURE_FLAGS payload (qword at +0), kept as Apple's core does

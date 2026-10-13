@@ -372,10 +372,12 @@ Settings listed the scanned networks; joining failed immediately. `setAssociateR
 
 ### Not needed from the driver (read from the disassembly)
 
-The family's `WCLNetManager::linkUp` -> `updateBss` -> `WCLBssManager::setCurrentBSS(WCLBSSBeacon*)` sets the current BSS from the
-join candidate, so SSID/BSSID/CHANNEL come from the family once 0xd3/0xd4/0xd5 arrive; the driver does not build a
-`IO80211BSSBeacon`. `linkUp` also issues a GET 0x1b2 TRAFFIC_COUNTERS (0x38 bytes) whose result it does not check; 0x1b2 is still
-refused (layout not determined).
+The family's `WCLNetManager::linkUp` -> `updateBss` -> `WCLBssManager::setCurrentBSS(WCLBSSBeacon*)` sets the current BSS, so
+SSID/BSSID/CHANNEL are answered by the family; the driver does not build a `IO80211BSSBeacon`. `linkUp` also issues a GET 0x1b2
+TRAFFIC_COUNTERS (0x38 bytes) whose result it does not check; 0x1b2 is still refused (layout not determined).
+
+**Correction (round 19):** "once 0xd3/0xd4/0xd5 arrive" was wrong. `linkUp` is only reached from the net-manager FSM's LINK_UP
+event, which comes from event 0xd8 (see round 19 below); 0xd3/0xd4/0xd5 alone leave the current BSS null.
 
 ### Checks (host-only)
 
@@ -456,3 +458,46 @@ After the reboot the link stayed up through the point where round 17 died (about
 gateway, ping 0 % loss. The post-mortem and recovery code never triggered (`wifi-postmortem` absent). The round-17 hang did
 not repeat; its cause stays chưa xác định (the previous boot had a root tcpdump + dig run on en4 at the time).
 Open: `itlmt_fast` is not set, so the link runs at `lvl 0 bw 0`; en1 (tether) is still the primary default route.
+
+## Round 19 (2026-10-13): the family never saw a link — event 0xd8 (not hardware-tested)
+
+### Symptom (user report after round 18)
+
+Internet works over en4, but System Settings > Wi-Fi and the quick-settings Wi-Fi item do not show the joined network.
+airportd/WiFiAgent: GET SSID/BSSID answered `0xe0822403` (no association) although the core is associated.
+
+### Root cause (read-only from the 24H32 IO80211Family disassembly)
+
+* `WCLConfigManager::getSSID` fails with `0xe0822403` while `WCLBssManager`'s current BSS is null.
+* The current BSS is set only by `WCLNetManager::updateBss` (GET 0x1b1 WCL_BSS_INFO into a 0x840-byte buffer, then
+  `setCurrentBSS`), called from `linkUp`, `wake` and `assocTimerAction`.
+* `linkUp` is reached from the net-manager FSM (states LINK_DOWN, WAITING_FOR_CONNECT_COMPLETE, WAITING_FOR_IP, LINK_UP,
+  DEAUTH, SLEEP, SLEEP_DEAUTH): LINK_DOWN --LINK_UP--> `firstLinkUp` -> WAITING_FOR_CONNECT_COMPLETE; CONNECT_COMPLETE (from the
+  join manager's 0xc0003 "join done") -> WAITING_FOR_IP; IPV4_STATUS -> LINK_UP.
+* The FSM's LINK_UP / LINK_DOWN_IND events come from `WCLNetManager::linkStatusInd`, a bulletin-board subscriber for the driver
+  event **0xd8**: `processEvent(byte[data+6] == 0 ? LINK_DOWN_IND : LINK_UP)`. The driver never posted 0xd8, so the FSM stayed in
+  LINK_DOWN, no `0x1b1`/`0x1bc`/`0x1c6` ever came (the call recorder shows none of them), and the current BSS stayed null.
+* Event routing: `postMessage(code)` -> `IO80211Glue::routeEventToWcl` -> `CommonGlue::sendMessage` ->
+  `WCLGlue::receiveMessageInternal`, bulletin id `(code << 16) | 2`; `WCLGlue::isMsgNeeded` drops events nobody subscribed to.
+* Pointer decode used for the KC data/vtables: `target = 0xffffff8000100000 + (raw & 0xffffffff)`.
+
+### Change (`itlmt7925Native` only; core unchanged)
+
+* `finishJoin(ok)` posts **0xd8** (0x10 bytes: `+0` BSSID, `+6` = 1) first, before 0x4e / 0xd3 / 0xd4 / 0xd5, so LINK_UP precedes
+  CONNECT_COMPLETE and the join manager is still busy when `firstLinkUp` checks it.
+* A core link loss (`linkFromCore(up=false)` while the family was told "up") makes `pollControl` post 0xd8 with `+6` = 0 and
+  reason `+8` = 1. `WCLNetManager::linkDownInd` treats reasons 1 and 3 as the plain path: no debounce, no recreate; it issues
+  `leaveNetworkCommand`, which reaches the driver's existing 0x1a9 handler (a core leave on an already-lost link).
+* Trace lines: `wcl:link status posted up=<0|1> reason=<n>`, `wcl:bss info answered ch= ssidLen= ie=`; the existing
+  `wcl:link up done` (0x1bc) and `wcl:link state ...` (0x1c6) now show whether the family reached `linkUp`.
+* Still refused (result not checked by `linkUp`): 0x1b2 TRAFFIC_COUNTERS.
+
+### One reboot, read in this order
+
+1. `ioreg -l -w0 | grep -E "itlmt_native_calls|itlmt_native_trace"`: expect `P:d8` before `P:4e P:d3 P:d4 P:d5`, then
+   `I:1b1`, `S:522`, `S:597` (0x1bc), `S:600` (0x1c6), and the trace `wcl:bss info answered`.
+2. Settings > Wi-Fi shows the network as connected; `log show --last 2m --predicate 'process == "airportd"'` has no
+   `0xe0822403` for SSID/BSSID.
+3. If `P:d8` is there but no `I:1b1`: the FSM rejected LINK_UP (read the `wifi` log of WCLNetManager for the state), or the
+   subscription table has no 0xd8 entry in the live build — then dump `gNET_MANAGERCallBackArray` again.
+4. Link loss: force one (move the AP out of range); expect `wcl:link status posted up=0 reason=1` then `assoc:leave=...`.
