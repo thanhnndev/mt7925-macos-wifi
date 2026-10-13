@@ -51,6 +51,9 @@ public:
     IOReturn setGET_DEBUG_INFO(IO80211SkywalkInterface *i, apple80211_debug_command *d) override;
 
 private:
+    uint32_t tracedCommands[32] = {};
+    uint32_t tracedCommandCount = 0;
+    uint32_t rejectedCommands = 0;
     bool makeLogger(IOService *owner);
     bool makeFaultReporter(IOService *owner);
     bool makeInterface(IOService *provider);
@@ -178,22 +181,28 @@ bool itlmt7925Wifi::start(IOService *provider)
         IOLog(LOGT "idle (boot-arg itlmt_native not set)\n");
         return false;
     }
+    itlmtTrace(this, "ctl:start");
+    itlmtTrace(this, "ctl:createWorkQueue begin");
     if (!createWorkQueue()) {
         IOLog(LOGT "no work queue\n");
         return false;
     }
+    itlmtTrace(this, "ctl:workQueue ok");
     if (!makeLogger(provider)) {
         IOLog(LOGT "no logger\n");
         return false;
     }
+    itlmtTrace(this, "ctl:logger ok");
     if (!makeFaultReporter(provider)) {
         IOLog(LOGT "no fault reporter\n");
         return false;
     }
+    itlmtTrace(this, "ctl:faultReporter ok; base start begin");
     if (!super::start(provider)) {
         IOLog(LOGT "IO80211Controller::start failed\n");
         return false;
     }
+    itlmtTrace(this, "ctl:base start ok");
     PE_parse_boot_argn("itlmt_native_wl", &wlMode, sizeof(wlMode));
     started = true;
     // Round 12: the inherited Skywalk media getter reads our dictionary;
@@ -418,8 +427,16 @@ IO80211FaultReporter *itlmt7925Wifi::getFaultReporterFromDriver()
 // 0x2b DRIVER_VERSION) are allowed; everything else stays refused until the matching handler exists.
 IOReturn itlmt7925Wifi::isCommandProhibited(int cmd)
 {
+    bool seen = false;
+    for (uint32_t n = 0; n < tracedCommandCount; n++) if (tracedCommands[n] == (uint32_t)cmd) seen = true;
+    if (!seen && tracedCommandCount < 32) {
+        tracedCommands[tracedCommandCount++] = (uint32_t)cmd;
+        itlmtTrace(this, "ioctl:cmd=%x %s", cmd, (cmd == 0x2b || cmd == 0x2c) ? "allowed" : "prohibited");
+    }
     if (cmd == 0x2b || cmd == 0x2c)
         return kIOReturnSuccess;
+    if ((++rejectedCommands & 63) == 1)
+        setProperty("itlmt_ioctl_rejected", (uint64_t)rejectedCommands, 64);
     return kProhibited;
 }
 

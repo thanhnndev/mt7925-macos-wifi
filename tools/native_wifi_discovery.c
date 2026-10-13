@@ -5,6 +5,7 @@
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <stdio.h>
 #include <string.h>
+#include <dlfcn.h>
 
 int main(void)
 {
@@ -20,6 +21,20 @@ int main(void)
         printf("SC: bsd=%s type=%s\n", bsd, type);
     }
     CFRelease(interfaces);
+    // Read-only BSD-name lookup, as declared in Apple's public configd source.
+    // Do not create or modify any network service/preferences.
+    typedef SCNetworkInterfaceRef (*CreateBSD)(CFAllocatorRef, CFStringRef, uint32_t);
+    CreateBSD createBSD = (CreateBSD)dlsym(RTLD_DEFAULT, "_SCNetworkInterfaceCreateWithBSDName");
+    if (createBSD) {
+        SCNetworkInterfaceRef x = createBSD(NULL, CFSTR("en9"), 0);
+        if (x) {
+            char type[128] = "nil";
+            CFStringRef s = SCNetworkInterfaceGetInterfaceType(x);
+            if (s) CFStringGetCString(s, type, sizeof(type), kCFStringEncodingUTF8);
+            printf("SC explicit BSD lookup: en9 type=%s\n", type);
+            CFRelease(x);
+        } else printf("SC explicit BSD lookup: en9 unavailable error=%d\n", SCError());
+    } else printf("SC explicit BSD lookup symbol unavailable\n");
     const char *classes[] = {"itlmt7925WifiInterface", "IOSkywalkNetworkBSDClient", "IONetworkInterface"};
     for (unsigned j = 0; j < sizeof(classes) / sizeof(classes[0]); j++) {
         io_iterator_t it = IO_OBJECT_NULL;

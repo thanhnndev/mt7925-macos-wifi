@@ -11,6 +11,9 @@
 #include "../itlmt7925/io80211/IO80211WorkQueue.h"
 #include "../itlmt7925/io80211/IO80211InfraProtocol.h"
 #include "skywalk_min.h"
+#include "../itlmt7925/itl_native_bridge.h"
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOLocks.h>
 
 
 // Appends "; <text>" to the registry property "itlmt_native_trace" of `e` (cap 480 bytes). IOLog output of third-party kexts was
@@ -34,6 +37,7 @@ public:
     void stop(IOService *provider) override;
     IOReturn enable(uint32_t options) override;
     IOReturn disable(uint32_t options) override;
+    void setInterfaceEnable(bool enabled) override;
     IOReturn processBSDCommand(__ifnet *netif, uint32_t command, void *data) override;
 
     // Accessors the Family calls on its interface (IO80211SkywalkInterface slots 418-439; AppleBCMWLANSkywalkInterface overrides them)
@@ -51,12 +55,30 @@ public:
     IOReturn enableDatapath() override;
     IOReturn disableDatapath() override;
     uint8_t getNumTxQueues() override;
+    uint32_t submitPackets(IOSkywalkPacket *const *, uint32_t);
+    static void receiveFromCore(OSObject *, const uint8_t *, uint32_t);
+    static void linkFromCore(OSObject *, bool, uint64_t);
+    static void datapathTick(OSObject *, IOTimerEventSource *);
 
 #define ITL_IFACE_DECLS
 #include "itlmt7925_iface_stubs.inc"
 #undef ITL_IFACE_DECLS
 
 private:
+    void drainDatapath();
+    IOService *core = nullptr;
+    IOTimerEventSource *dpTimer = nullptr;
+    IOLock *rxLock = nullptr;
+    struct RxFrame { uint32_t length; uint8_t bytes[1600]; };
+    RxFrame *rxRing = nullptr;
+    uint32_t rxHead = 0, rxTail = 0;
+    IOSkywalkPacket *pendingTx[512] = {};
+    uint32_t pendingCount = 0;
+    bool dpEnabled = false, bound = false, radioUp = false, linkDirty = false;
+    bool firstTxTrace = false, firstRxTrace = false, firstCompletionTrace = false;
+    uint64_t radioSpeed = 0;
+    uint32_t txSent = 0, txDropped = 0, txStalled = 0, txCompleted = 0;
+    uint32_t rxReceived = 0, rxDropped = 0, rxDelivered = 0, ticks = 0;
     bool createPoolAndQueues();
     void destroyPoolAndQueues();
 

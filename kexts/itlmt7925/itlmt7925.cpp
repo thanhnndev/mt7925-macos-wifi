@@ -193,6 +193,10 @@ bool itlmt7925::start(IOService *provider)
     uint32_t m1 = 0;
     txLock = IOLockAlloc();
     cmdLock = IOLockAlloc();
+    nativeLock = IOLockAlloc();
+    if (!nativeLock) return false;
+    uint32_t nativeDP = 0;
+    nativeMode = PE_parse_boot_argn("itlmt_native_dp", &nativeDP, sizeof(nativeDP)) && nativeDP;
     setProperty("wifi-state", "off");                         // until M3 runs (boot-arg itlmt_m3=1)
 
     pci = OSDynamicCast(IOPCIDevice, provider);

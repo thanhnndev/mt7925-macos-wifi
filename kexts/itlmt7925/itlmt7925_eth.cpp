@@ -221,11 +221,23 @@ bool itlmt7925::ethCreate()
 
 void itlmt7925::ethRx(const uint8_t *frame, uint32_t len)
 {
+    if (nativeMode && nativeLock) {
+        IOLockLock(nativeLock);
+        if (nativeSink.owner && nativeSink.receive) nativeSink.receive(nativeSink.owner, frame, len);
+        IOLockUnlock(nativeLock);
+        return;
+    }
     if (eth) eth->rxPacket(frame, len);
 }
 
 void itlmt7925::ethLink(bool up)
 {
+    if (nativeMode && nativeLock) {
+        IOLockLock(nativeLock);
+        if (nativeSink.owner && nativeSink.link) nativeSink.link(nativeSink.owner, up, up ? linkSpeedBps() : 0);
+        IOLockUnlock(nativeLock);
+        return;
+    }
     if (!eth) return;
     eth->setLink(up);
     eth->txKick();                                                         // a stalled queue drains (link down: drops) or resumes
@@ -239,4 +251,45 @@ void itlmt7925::ethFlush()
 void itlmt7925::ethTxKick()
 {
     if (eth) eth->txKick();
+}
+
+IOReturn itlmt7925::callPlatformFunction(const OSSymbol *name, bool wait, void *p1, void *p2, void *p3, void *p4)
+{
+    if (!name) return kIOReturnBadArgument;
+    if (name->isEqualTo(ITL_NATIVE_MAC)) {
+        if (!p1) return kIOReturnBadArgument;
+        memcpy(p1, mac, 6);
+        return kIOReturnSuccess;
+    }
+    if (name->isEqualTo(ITL_NATIVE_TX)) {
+        if (!nativeMode || !p1) return kIOReturnNotReady;
+        ItlNativeTx *tx = (ItlNativeTx *)p1;
+        if (!tx->bytes || tx->length < 14 || tx->length > 1600) return kIOReturnBadArgument;
+        tx->result = ethTx(tx->bytes, tx->length); // hardware copies into its own staging buffer
+        return kIOReturnSuccess;
+    }
+    if (name->isEqualTo(ITL_NATIVE_BIND)) {
+        ItlNativeSink *sink = (ItlNativeSink *)p1;
+        if (!nativeMode || !nativeLock) return kIOReturnNotReady;
+        if (!sink || sink->version != 1 || !sink->owner || !sink->receive || !sink->link)
+            return kIOReturnBadArgument;
+        IOLockLock(nativeLock);
+        if (nativeSink.owner) { IOLockUnlock(nativeLock); return kIOReturnBusy; }
+        nativeSink = *sink;
+        nativeSink.link(nativeSink.owner, m3linkUp, m3linkUp ? linkSpeedBps() : 0);
+        // Unbind is a callback barrier: callbacks execute under nativeLock.
+        IOLockUnlock(nativeLock);
+        IOLog("itlmt7925 native: sink bound\n");
+        return kIOReturnSuccess;
+    }
+    if (name->isEqualTo(ITL_NATIVE_UNBIND)) {
+        if (!nativeLock) return kIOReturnNotReady;
+        IOLockLock(nativeLock);
+        if (nativeSink.owner != p1) { IOLockUnlock(nativeLock); return kIOReturnNotAttached; }
+        bzero(&nativeSink, sizeof(nativeSink));
+        IOLockUnlock(nativeLock);
+        IOLog("itlmt7925 native: sink unbound\n");
+        return kIOReturnSuccess;
+    }
+    return IOService::callPlatformFunction(name, wait, p1, p2, p3, p4);
 }

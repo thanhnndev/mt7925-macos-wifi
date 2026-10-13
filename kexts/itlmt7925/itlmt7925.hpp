@@ -13,6 +13,7 @@
 
 #include "itl_caps.h"
 #include "itl_ba.h"
+#include "itl_native_bridge.h"
 
 class itlmt7925Eth;
 class IOUserClient;
@@ -52,6 +53,7 @@ public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
     void free() override;
+    IOReturn callPlatformFunction(const OSSymbol *, bool, void *, void *, void *, void *) override;
     // Ethernet interface glue (itlmt7925_eth.cpp): frames from the network stack / frames received from the AP
     // 0 sent, 1 no TX buffer free (the output queue keeps the frame until ethTxKick()), -1 dropped
     int  ethTx(const uint8_t *frame, uint32_t len);
@@ -70,6 +72,9 @@ public:
     IOReturn ucDisconnect();
 
 private:
+    bool nativeMode = false;
+    IOLock *nativeLock = nullptr;
+    ItlNativeSink nativeSink = {};
     IOPCIDevice *pci = nullptr;
     IOMemoryMap *bar0 = nullptr;
     volatile uint8_t *regs = nullptr;

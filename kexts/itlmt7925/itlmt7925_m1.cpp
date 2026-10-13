@@ -534,6 +534,10 @@ void itlmt7925::m1Main()
     PE_parse_boot_argn("itlmt_m1", &delay, sizeof(delay));
     if (PE_parse_boot_argn("itlmt_m2", &m2, sizeof(m2)) && m2) m2On = true;
     if (PE_parse_boot_argn("itlmt_m3", &m3, sizeof(m3)) && m3) m3On = m2On = true;
+    if (nativeMode) {
+        m3On = m2On = true;
+        m1log("native datapath radio engine enabled; legacy Ethernet disabled");
+    }
     uint32_t reo = 0;
     if (PE_parse_boot_argn("itlmt_reo", &reo, sizeof(reo)) && reo >= 5 && reo <= 500) reoMs = reo;
     uint32_t fast = 0;

@@ -10,8 +10,10 @@
 #include "itlmt7925_iface.h"
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <stdarg.h>
 #include <string.h>
+#include <pexpert/pexpert.h>
 
 #define super IO80211InfraProtocol
 OSDefineMetaClassAndStructors(itlmt7925WifiInterface, IO80211InfraProtocol)
@@ -27,7 +29,8 @@ const uint32_t kPoolBufferSize = 0x800;
 
 // Dequeue / completion callbacks. What a callback must do with the packets it is handed (ownership, completion) is NOT
 // determined (stage 2 has no radio and never enables the queues); they take nothing and report no work.
-uint32_t txSubmissionAction(OSObject *, IOSkywalkTxSubmissionQueue *, IOSkywalkPacket *const *, uint32_t, void *) { return 0; }
+uint32_t txSubmissionAction(OSObject *owner, IOSkywalkTxSubmissionQueue *, IOSkywalkPacket *const *packets, uint32_t count, void *)
+{ return ((itlmt7925WifiInterface *)owner)->submitPackets(packets, count); }
 uint32_t rxSubmissionAction(OSObject *, IOSkywalkRxSubmissionQueue *, IOSkywalkPacket *const *, uint32_t, void *) { return 0; }
 uint32_t txCompletionAction(OSObject *, IOSkywalkTxCompletionQueue *, IOSkywalkPacket **, uint32_t, void *) { return 0; }
 uint32_t rxCompletionAction(OSObject *, IOSkywalkRxCompletionQueue *, IOSkywalkPacket **, uint32_t, void *) { return 0; }
@@ -54,13 +57,37 @@ void itlmtTrace(IORegistryEntry *e, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(add, sizeof(add), fmt, ap);
     va_end(ap);
+    IOLog("itlmt-native: %s\n", add); // also emit every milestone to the kernel log before registry work
+    e->setProperty("itlmt_native_last", add);
     char buf[1536];
     buf[0] = 0;
-    if (OSString *old = OSDynamicCast(OSString, e->getProperty("itlmt_native_trace")))
+    OSObject *snapshot = e->copyProperty("itlmt_native_trace");
+    if (OSString *old = OSDynamicCast(OSString, snapshot))
         strlcpy(buf, old->getCStringNoCopy(), sizeof(buf));
+    if (snapshot) snapshot->release();
     if (buf[0]) strlcat(buf, "; ", sizeof(buf));
-    if (strlcat(buf, add, 1500) >= 1500) return;      // full: keep what is there
-    e->setProperty("itlmt_native_trace", buf);
+    bool full = strlcat(buf, add, 1500) >= 1500;
+    if (full) {
+        // Preserve recent diagnostic entries after the startup prefix fills up.
+        e->setProperty("itlmt_native_trace_tail", add);
+    }
+    if (!full) e->setProperty("itlmt_native_trace", buf);
+    uint32_t nvtrace = 0;
+    if (PE_parse_boot_argn("itlmt_native_nvtrace", &nvtrace, sizeof(nvtrace)) && nvtrace) {
+        // Low-frequency lifecycle checkpoints only, no packet bytes or network identifiers.
+        // Best effort: a panic before NVRAM flush can still lose the latest checkpoint.
+        IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (options) {
+            OSData *data = OSData::withBytes(full ? add : buf, (unsigned)strlen(full ? add : buf));
+            if (data) {
+                const char *key = full ? "itlmt-native-last" : "itlmt-native-trace";
+                options->setProperty(key, data);
+                data->release();
+                options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", key);
+            }
+            options->release();
+        }
+    }
 }
 
 itlmt7925WifiInterface *itlmt7925WifiInterface::withController(IO80211Controller *controller, uint32_t ifId, uint32_t role)
@@ -84,7 +111,9 @@ itlmt7925WifiInterface *itlmt7925WifiInterface::withController(IO80211Controller
 
 bool itlmt7925WifiInterface::init()
 {
-    return super::init();
+    if (!super::init()) return false;
+    rxLock = IOLockAlloc();
+    return rxLock != nullptr;
 }
 
 bool itlmt7925WifiInterface::createPoolAndQueues()
@@ -161,6 +190,23 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
         }
     }
     itlmtTrace(ctl, "sw:addEventSource x%u ok", n);
+    uint32_t dp = 0;
+    if (PE_parse_boot_argn("itlmt_native_dp", &dp, sizeof(dp)) && dp) {
+        core = controller->getProvider();
+        rxRing = (RxFrame *)IOMalloc(sizeof(RxFrame) * 64);
+        dpTimer = IOTimerEventSource::timerEventSource(this, datapathTick);
+        if (!core || !rxRing || !dpTimer || queued->addEventSource(dpTimer) != kIOReturnSuccess) {
+            itlmtTrace(ctl, "dp:timer/ring setup failed");
+            destroyPoolAndQueues();
+            return false;
+        }
+        ItlNativeSink sink = {1, this, receiveFromCore, linkFromCore};
+        IOReturn br = core->callPlatformFunction(ITL_NATIVE_BIND, false, &sink, nullptr, nullptr, nullptr);
+        itlmtTrace(ctl, "dp:bind=%x", br);
+        if (br != kIOReturnSuccess) { destroyPoolAndQueues(); return false; }
+        bound = true;
+        dpTimer->setTimeoutMS(10);
+    }
 
     headroom = field<uint16_t>(info, 0x3c);
     field<uint32_t>(info, 0x48) -= headroom;
@@ -189,6 +235,29 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
 // removeEventSource, release.
 void itlmt7925WifiInterface::destroyPoolAndQueues()
 {
+    if (bound && core) {
+        itlmtTrace(ctl, "dp:unbind begin");
+        core->callPlatformFunction(ITL_NATIVE_UNBIND, false, this, nullptr, nullptr, nullptr);
+        bound = false;
+    }
+    dpEnabled = false;
+    if (dpTimer) {
+        dpTimer->cancelTimeout();
+        if (queued) queued->removeEventSource(dpTimer);
+        dpTimer->release(); dpTimer = nullptr;
+    }
+    // Reclaim submitted packets while the completion queue is still enabled.
+    while (pendingCount && txComp) {
+        IOReturn r = txComp->enqueuePackets(pendingTx, 1, 0);
+        if (r != kIOReturnSuccess) {
+            // Submission packet completion must notify its source queue before freeing.
+            itlmtTrace(ctl, "dp:teardown completion blocked=%x pending=%u", r, pendingCount);
+            break;
+        }
+        memmove(pendingTx, pendingTx + 1, (--pendingCount) * sizeof(pendingTx[0]));
+    }
+    if (rxRing) { IOFree(rxRing, sizeof(RxFrame) * 64); rxRing = nullptr; }
+    core = nullptr;
     IOSkywalkPacketQueue *all[kNumTx + 2];
     uint32_t n = 0;
     for (uint32_t i = 0; i < kNumTx; i++) {
@@ -222,6 +291,7 @@ void itlmt7925WifiInterface::stop(IOService *provider)
 void itlmt7925WifiInterface::free()
 {
     destroyPoolAndQueues();
+    if (rxLock) { IOLockFree(rxLock); rxLock = nullptr; }
     super::free();
 }
 
@@ -282,20 +352,40 @@ IOSkywalkPacketBufferPool *itlmt7925WifiInterface::getRxPacketPool()
 
 IOReturn itlmt7925WifiInterface::enableDatapath()
 {
-    itlmtTrace(ctl, "if:enableDatapath unsupported");
-    return kIOReturnUnsupported;    // no radio in stage 2
+    if (!bound || !core || !dpTimer) return kIOReturnNotReady;
+    if (dpEnabled) return kIOReturnSuccess;
+    itlmtTrace(ctl, "dp:enable queues begin");
+    itlmtTrace(ctl, "dp:TX completion enable"); txComp->enable();
+    itlmtTrace(ctl, "dp:RX completion enable"); rxComp->enable();
+    for (uint32_t i = 0; i < kNumTx; i++) {
+        itlmtTrace(ctl, "dp:TX submission %u enable", i);
+        txSub[i]->enable();
+    }
+    dpEnabled = true;
+    setRunningState(true);
+    setProperty("itlmt_datapath_enabled", true);
+    dpTimer->setTimeoutMS(10);
+    itlmtTrace(ctl, "dp:enabled");
+    return kIOReturnSuccess;
 }
 
 IOReturn itlmt7925WifiInterface::disableDatapath()
 {
-    itlmtTrace(ctl, "if:disableDatapath unsupported");
-    return kIOReturnUnsupported;
+    if (!dpEnabled) return kIOReturnSuccess;
+    itlmtTrace(ctl, "dp:disable queues");
+    dpEnabled = false;
+    setRunningState(false);
+    for (uint32_t i = 0; i < kNumTx; i++) if (txSub[i]) txSub[i]->disable();
+    // Completion queues remain active until outstanding TX ownership is returned.
+    setProperty("itlmt_datapath_enabled", false);
+    return kIOReturnSuccess;
 }
 
 IOReturn itlmt7925WifiInterface::enable(uint32_t options)
 {
     itlmtTrace(ctl, "if:enable begin options=%x", options);
     IOReturn result = IO80211InfraProtocol::enable(options);
+    if (result == kIOReturnSuccess && bound) result = enableDatapath();
     itlmtTrace(ctl, "if:enable result=%x", result);
     return result;
 }
@@ -303,6 +393,7 @@ IOReturn itlmt7925WifiInterface::enable(uint32_t options)
 IOReturn itlmt7925WifiInterface::disable(uint32_t options)
 {
     itlmtTrace(ctl, "if:disable begin options=%x", options);
+    disableDatapath();
     IOReturn result = IO80211InfraProtocol::disable(options);
     itlmtTrace(ctl, "if:disable result=%x", result);
     return result;
@@ -310,6 +401,8 @@ IOReturn itlmt7925WifiInterface::disable(uint32_t options)
 
 IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t command, void *data)
 {
+    if (command == 0xc02c6938 || command == 0xc0286938 || command == 0x80206910)
+        itlmtTrace(ctl, "if:bsd cmd=%x begin", command);
     IOReturn result = IO80211InfraProtocol::processBSDCommand(netif, command, data);
     // Record only media queries and interface flags; never dump ioctl payloads.
     if (command == 0xc02c6938 || command == 0xc0286938 || command == 0x80206910)
@@ -317,9 +410,148 @@ IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t comm
     return result;
 }
 
+void itlmt7925WifiInterface::setInterfaceEnable(bool enabled)
+{
+    itlmtTrace(ctl, "if:setInterfaceEnable=%u begin", enabled);
+    IO80211InfraProtocol::setInterfaceEnable(enabled);
+    itlmtTrace(ctl, "if:setInterfaceEnable=%u done", enabled);
+}
+
 uint8_t itlmt7925WifiInterface::getNumTxQueues()
 {
     return kNumTx;
+}
+
+uint32_t itlmt7925WifiInterface::submitPackets(IOSkywalkPacket *const *packets, uint32_t count)
+{
+    if (!dpEnabled || !core || !packets) return 0;
+    IOLockLock(rxLock);
+    bool up = radioUp;
+    IOLockUnlock(rxLock);
+    if (!up) { txStalled++; return 0; }
+    if (!firstTxTrace) { firstTxTrace = true; itlmtTrace(ctl, "dp:TX callback begin"); }
+    uint32_t used = 0;
+    for (; used < count && pendingCount < 512; used++) {
+        IOSkywalkPacket *p = packets[used];
+        if (!p) break;
+        uint32_t len = p->getDataLength(), size = p->getBufferSize();
+        uint16_t offset = p->getDataOffset();
+        void *base = p->getDataVirtualAddress();
+        int result = -1;
+        if (base && p->getPacketBufferCount() == 1 && len >= 14 && len <= 1600 && offset <= size && len <= size - offset) {
+            ItlNativeTx tx = {(const uint8_t *)base + offset, len, -1};
+            IOReturn r = core->callPlatformFunction(ITL_NATIVE_TX, false, &tx, nullptr, nullptr, nullptr);
+            if (r == kIOReturnSuccess) result = tx.result;
+        }
+        if (result > 0) { txStalled++; break; } // callback takes no ownership of this packet; retry on next tick
+        if (result == 0) txSent++; else txDropped++;
+        // Complete only after submission callback returns and the queue records consumption.
+        pendingTx[pendingCount++] = p;
+    }
+    if (used && txSent + txDropped <= used) itlmtTrace(ctl, "dp:first TX consumed=%u", used);
+    return used;
+}
+
+void itlmt7925WifiInterface::receiveFromCore(OSObject *owner, const uint8_t *bytes, uint32_t length)
+{
+    auto *i = (itlmt7925WifiInterface *)owner;
+    if (!i->rxLock) return;
+    IOLockLock(i->rxLock);
+    uint32_t next = (i->rxHead + 1) % 64;
+    if (!i->rxRing || !bytes || length < 14 || length > 1600 || next == i->rxTail) i->rxDropped++;
+    else {
+        RxFrame &f = i->rxRing[i->rxHead];
+        f.length = length; memcpy(f.bytes, bytes, length);
+        i->rxHead = next; i->rxReceived++;
+    }
+    IOLockUnlock(i->rxLock);
+}
+
+void itlmt7925WifiInterface::linkFromCore(OSObject *owner, bool up, uint64_t speed)
+{
+    auto *i = (itlmt7925WifiInterface *)owner;
+    if (!i->rxLock) return;
+    IOLockLock(i->rxLock);
+    i->radioUp = up; i->radioSpeed = speed; i->linkDirty = true;
+    IOLockUnlock(i->rxLock);
+}
+
+void itlmt7925WifiInterface::datapathTick(OSObject *owner, IOTimerEventSource *)
+{
+    ((itlmt7925WifiInterface *)owner)->drainDatapath();
+}
+
+void itlmt7925WifiInterface::drainDatapath()
+{
+    if (!bound || !core || !dpTimer) return;
+    IOLockLock(rxLock);
+    bool dirty = linkDirty, up = radioUp;
+    uint64_t speed = radioSpeed;
+    linkDirty = false;
+    IOLockUnlock(rxLock);
+    if (dirty) {
+        itlmtTrace(ctl, "dp:radio link=%u", up);
+        ctl->setLinkStatus(kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0),
+                           up ? ctl->getSelectedMedium() : nullptr, up ? speed : 0);
+        setProperty("itlmt_radio_link", up);
+    }
+    // TX staging has already copied packet bytes. Return Skywalk ownership exactly once.
+    while (pendingCount) {
+        if (!firstCompletionTrace) {
+            firstCompletionTrace = true; itlmtTrace(ctl, "dp:TX completion begin");
+        }
+        IOReturn r = txComp->enqueuePackets(pendingTx, 1, 0);
+        if (r != kIOReturnSuccess) {
+            if (ticks == 0 || ticks == 100 || ticks == 200)
+                itlmtTrace(ctl, "dp:TX completion=%x pending=%u", r, pendingCount);
+            break;
+        }
+        memmove(pendingTx, pendingTx + 1, (--pendingCount) * sizeof(pendingTx[0]));
+        txCompleted++;
+    }
+    if (dpEnabled) {
+        // RX copies are moved onto the native gate; core worker never acquires this gate.
+        for (uint32_t batch = 0; batch < 32; batch++) {
+            RxFrame f;
+            IOLockLock(rxLock);
+            bool ready = rxHead != rxTail;
+            if (ready) { f = rxRing[rxTail]; rxTail = (rxTail + 1) % 64; }
+            IOLockUnlock(rxLock);
+            if (!ready) break;
+            if (!firstRxTrace) { firstRxTrace = true; itlmtTrace(ctl, "dp:RX allocation/enqueue begin"); }
+            IOSkywalkPacket *p = nullptr;
+            IOReturn r = pool->allocatePacket(1, &p, 1); // no-sleep allocation on the native work loop
+            if (r == kIOReturnSuccess && p) {
+                void *data = p->getDataVirtualAddress();
+                if (!data || p->getPacketBufferCount() != 1 || p->getBufferSize() < f.length)
+                    r = kIOReturnNoSpace;
+                else {
+                    memcpy(data, f.bytes, f.length);
+                    r = p->setDataOffsetAndLength(0, f.length);
+                    if (r == kIOReturnSuccess) r = rxComp->enqueuePackets(&p, 1, 0);
+                }
+                if (r != kIOReturnSuccess) pool->deallocatePacket(p);
+            }
+            if (r == kIOReturnSuccess && p) rxDelivered++;
+            else { IOLockLock(rxLock); rxDropped++; IOLockUnlock(rxLock); }
+            if (r == kIOReturnSuccess && p && rxDelivered == 1) itlmtTrace(ctl, "dp:first RX delivered");
+        }
+        for (uint32_t i = 0; i < kNumTx; i++) txSub[i]->requestDequeue(nullptr, 1);
+    }
+    if ((++ticks % 100) == 0) {
+        IOLockLock(rxLock);
+        uint32_t received = rxReceived, dropped = rxDropped;
+        IOLockUnlock(rxLock);
+        setProperty("itlmt_tx_sent", (uint64_t)txSent, 64);
+        setProperty("itlmt_tx_drop", (uint64_t)txDropped, 64);
+        setProperty("itlmt_tx_stall", (uint64_t)txStalled, 64);
+        setProperty("itlmt_tx_completed", (uint64_t)txCompleted, 64);
+        setProperty("itlmt_rx_received", (uint64_t)received, 64);
+        setProperty("itlmt_rx_delivered", (uint64_t)rxDelivered, 64);
+        setProperty("itlmt_rx_drop", (uint64_t)dropped, 64);
+        setProperty("itlmt_tx_pending", (uint64_t)pendingCount, 32);
+    }
+    dpTimer->setTimeoutMS(10);
 }
 
 #define ITL_IFACE_DEFS

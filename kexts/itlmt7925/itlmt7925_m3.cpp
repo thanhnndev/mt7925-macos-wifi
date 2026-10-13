@@ -1257,8 +1257,8 @@ int itlmt7925::m3Handshake()
 // Link is up: expose the Ethernet interface and keep servicing the receive rings. Returns only to give up the current fast level.
 void itlmt7925::m3Link()
 {
-    bool eok = eth ? true : ethCreate();                     // the interface survives a fall-back to a lower level
-    m3log("ethernet interface %s", eok ? "created" : "FAILED");
+    bool eok = nativeMode || eth || ethCreate();
+    m3log("%s interface %s", nativeMode ? "native" : "ethernet", eok ? "ready" : "FAILED");
     ethLink(true);
     baReset();
     txSn = 0;
