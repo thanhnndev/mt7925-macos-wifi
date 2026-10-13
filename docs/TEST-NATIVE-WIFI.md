@@ -194,3 +194,5 @@ After the next boot, first collect baseline logs and media/discovery, then enabl
 * 2026-10-13, datapath c2e21ce boot: no panic; core join/efuse/CLC succeed, en9 media EIO fixed, explicit enable succeeds, IEEE80211 service created. DHCP remains INACTIVE and traffic counters zero; delivery unverified. Follow-up stable station identity/linkState/software checksum changes prepared. See docs/native-wifi-results/20261013-datapath-c2e21ce/README.md.
 
 * 2026-10-13, c78492b boot: no panic, native auto-enable/core link up; DHCP still blocked by inactive BSD media, traffic counters zero. Follow-up corrects ifmediareq status after Family handling, applies station address and clears BSD offloads during prepare. Interface slots 217 correct/0 wrong; only six baseline symbols missing. See docs/native-wifi-results/20261013-datapath-c78492b/.
+
+* 2026-10-13, 78852cc boot: no panic; en9 media active, DHCP transmits, TX/completion work. No lease; RX reaches bridge but first frame drops during allocation/validation/enqueue (substep not traced). Live MAC correction succeeded after prepare returned ENXIO. See docs/native-wifi-results/20261013-datapath-78852cc/.
