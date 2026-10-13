@@ -595,6 +595,8 @@ struct ContentView: View {
                 Toggle("Open at Login", isOn: Binding(get: { m.loginEnabled }, set: { m.setLogin($0) }))
                     .toggleStyle(.switch).controlSize(.mini).font(.system(size: 12))
                 Spacer()
+                Link("by thanhnndev", destination: URL(string: "https://github.com/thanhnndev")!)
+                    .font(.system(size: 11)).foregroundStyle(.secondary).help("github.com/thanhnndev")
                 Button("Quit") { NSApp.terminate(nil) }.buttonStyle(.borderless).font(.system(size: 12))
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
