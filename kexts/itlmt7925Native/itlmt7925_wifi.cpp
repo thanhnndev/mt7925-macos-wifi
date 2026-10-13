@@ -30,6 +30,7 @@ public:
     bool init(OSDictionary *properties = nullptr) override;
     bool start(IOService *provider) override;
     IOReturn selectMedium(const IONetworkMedium *medium) override;
+    IOReturn getHardwareAddress(IOEthernetAddress *address) override;
     void stop(IOService *provider) override;
     void free() override;
 
@@ -54,6 +55,7 @@ private:
     uint32_t tracedCommands[32] = {};
     uint32_t tracedCommandCount = 0;
     uint32_t rejectedCommands = 0;
+    uint8_t stationAddress[6] = {0x02, 0x00, 0x79, 0x25, 0x00, 0x01};
     bool makeLogger(IOService *owner);
     bool makeFaultReporter(IOService *owner);
     bool makeInterface(IOService *provider);
@@ -243,6 +245,15 @@ IOReturn itlmt7925Wifi::selectMedium(const IONetworkMedium *medium)
     return setSelectedMedium(medium) ? kIOReturnSuccess : kIOReturnError;
 }
 
+IOReturn itlmt7925Wifi::getHardwareAddress(IOEthernetAddress *address)
+{
+    if (!address) return kIOReturnBadArgument;
+    // Supply the station identity independently of Family interface/MAC-agent
+    // initialization. The default getter depends on those objects being ready.
+    memcpy(address, stationAddress, sizeof(stationAddress));
+    return kIOReturnSuccess;
+}
+
 static bool findMac(IOService *provider, uint8_t out[6])
 {
     bool found = false;
@@ -273,6 +284,7 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
         memcpy(mac, fallback, 6);
         IOLog(LOGT "no IOMACAddress under the core driver, using a placeholder\n");
     }
+    memcpy(stationAddress, mac, sizeof(stationAddress));
     // Role 1 is the primary station interface. Role 2 (LowLatency) is a secondary one: IO80211SkywalkInterface::start needs
     // ivars->parentInterface for it (it logs a failure at IO80211SkywalkInterface.cpp:0x1f8 otherwise), createSkywalkInterface only
     // makes it from a bus flag and passes the parent as its 4th argument. itlmt_native_role=2 keeps the old path for comparison.

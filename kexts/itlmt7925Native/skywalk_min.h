@@ -20,7 +20,7 @@ class IOSkywalkPacket : public OSObject {
 public:
     uint32_t getDataLength() const;
     uint32_t getBufferSize() const;
-    uint16_t getPacketBufferCount() const;
+    uint32_t getPacketBufferCount() const;
     uint16_t getDataOffset() const;
     void *getDataVirtualAddress() const;
     IOReturn setDataOffsetAndLength(uint16_t offset, uint32_t length);

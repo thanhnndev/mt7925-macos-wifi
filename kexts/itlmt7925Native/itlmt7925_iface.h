@@ -38,6 +38,8 @@ public:
     IOReturn enable(uint32_t options) override;
     IOReturn disable(uint32_t options) override;
     void setInterfaceEnable(bool enabled) override;
+    uint32_t linkState() override;
+    uint32_t getHardwareAssists() override;
     IOReturn processBSDCommand(__ifnet *netif, uint32_t command, void *data) override;
 
     // Accessors the Family calls on its interface (IO80211SkywalkInterface slots 418-439; AppleBCMWLANSkywalkInterface overrides them)
@@ -78,6 +80,11 @@ private:
     bool firstTxTrace = false, firstRxTrace = false, firstCompletionTrace = false;
     bool linkTraceValid = false, linkTraceUp = false;
     uint32_t linkReportFailures = 0;
+    bool mediaTraced[2] = {};
+    IOReturn lastMediaResult[2] = {kIOReturnSuccess, kIOReturnSuccess};
+    uint32_t mediaQueryCount = 0;
+    uint8_t txScratch[1600] = {};
+    uint32_t txChecksumFailures = 0;
     uint64_t radioSpeed = 0;
     uint32_t txSent = 0, txDropped = 0, txStalled = 0, txCompleted = 0;
     uint32_t rxReceived = 0, rxDropped = 0, rxDelivered = 0, ticks = 0;

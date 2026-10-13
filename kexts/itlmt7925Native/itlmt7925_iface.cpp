@@ -8,6 +8,7 @@
 //   (info+0x3c) is subtracted from info+0x48 / +0x4c -> registerInfraEthernetInterface(info, [Tx x n, TxC, RxC], n+2, pool, pool)
 //   (result 0 = success). The pool and the queues are created here directly with the IOSkywalk factories.
 #include "itlmt7925_iface.h"
+#include "ether_checksum.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceTreeSupport.h>
@@ -401,13 +402,49 @@ IOReturn itlmt7925WifiInterface::disable(uint32_t options)
 
 IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t command, void *data)
 {
-    if (command == 0xc02c6938 || command == 0xc0286938 || command == 0x80206910)
+    bool media = command == 0xc02c6938 || command == 0xc0286938;
+    uint32_t index = command == 0xc0286938 ? 1 : 0;
+    bool firstMedia = media && !mediaTraced[index];
+    if (firstMedia || command == 0x80206910)
         itlmtTrace(ctl, "if:bsd cmd=%x begin", command);
     IOReturn result = IO80211InfraProtocol::processBSDCommand(netif, command, data);
     // Record only media queries and interface flags; never dump ioctl payloads.
-    if (command == 0xc02c6938 || command == 0xc0286938 || command == 0x80206910)
+    if (firstMedia || command == 0x80206910 || (media && result != lastMediaResult[index]))
         itlmtTrace(ctl, "if:bsd cmd=%x result=%x", command, result);
+    if (media) {
+        mediaTraced[index] = true;
+        lastMediaResult[index] = result;
+        if ((++mediaQueryCount & 63) == 1)
+            setProperty("itlmt_media_query_count", (uint64_t)mediaQueryCount, 64);
+    }
     return result;
+}
+
+uint32_t itlmt7925WifiInterface::linkState()
+{
+    if (!bound || !rxLock) return IO80211InfraProtocol::linkState();
+    IOLockLock(rxLock);
+    bool up = radioUp;
+    IOLockUnlock(rxLock);
+    // SDK enum and round-12 medium-status branches: Undefined=0, Down=1, Up=2.
+    return up ? 2 : 1;
+}
+
+uint32_t itlmt7925WifiInterface::getHardwareAssists()
+{
+    // Core TX accepts complete Ethernet frames. It has no checksum/TSO offload.
+    return 0;
+}
+
+IOReturn itlmt7925WifiInterface::setMacAddress(ether_addr &address)
+{
+    IOEthernetAddress current = {};
+    if (!ctl || ctl->getHardwareAddress(&current) != kIOReturnSuccess) return kIOReturnNotReady;
+    bool same = memcmp(&address, &current, 6) == 0;
+    itlmtTrace(ctl, "if:setMacAddress %s", same ? "station identity unchanged" : "change unsupported");
+    // Initial MAC is already scheduled into core firmware setup. Do not falsely
+    // accept a new address without rebuilding firmware device/BSS configuration.
+    return same ? kIOReturnSuccess : kIOReturnUnsupported;
 }
 
 void itlmt7925WifiInterface::setInterfaceEnable(bool enabled)
@@ -429,19 +466,26 @@ uint32_t itlmt7925WifiInterface::submitPackets(IOSkywalkPacket *const *packets, 
     bool up = radioUp;
     IOLockUnlock(rxLock);
     if (!up) { txStalled++; return 0; }
-    if (!firstTxTrace) { firstTxTrace = true; itlmtTrace(ctl, "dp:TX callback begin"); }
+    bool first = !firstTxTrace;
+    if (first) { firstTxTrace = true; itlmtTrace(ctl, "dp:TX callback begin"); }
     uint32_t used = 0;
     for (; used < count && pendingCount < 512; used++) {
         IOSkywalkPacket *p = packets[used];
         if (!p) break;
-        uint32_t len = p->getDataLength(), size = p->getBufferSize();
-        uint16_t offset = p->getDataOffset();
-        void *base = p->getDataVirtualAddress();
+        bool single = p->getPacketBufferCount() == 1;
+        uint32_t len = p->getDataLength(), size = single ? p->getBufferSize() : 0;
+        uint16_t offset = single ? p->getDataOffset() : 0;
+        void *base = single ? p->getDataVirtualAddress() : nullptr;
         int result = -1;
-        if (base && p->getPacketBufferCount() == 1 && len >= 14 && len <= 1600 && offset <= size && len <= size - offset) {
-            ItlNativeTx tx = {(const uint8_t *)base + offset, len, -1};
-            IOReturn r = core->callPlatformFunction(ITL_NATIVE_TX, false, &tx, nullptr, nullptr, nullptr);
-            if (r == kIOReturnSuccess) result = tx.result;
+        if (base && len >= 14 && len <= 1600 && offset <= size && len <= size - offset) {
+            memcpy(txScratch, (const uint8_t *)base + offset, len);
+            if (first && used == 0)
+                itlmtTrace(ctl, "dp:TX len=%u offset=%u type=%x", len, offset, itl_checksum::read16(txScratch + 12));
+            if (itl_checksum::ethernet(txScratch, len)) {
+                ItlNativeTx tx = {txScratch, len, -1};
+                IOReturn r = core->callPlatformFunction(ITL_NATIVE_TX, false, &tx, nullptr, nullptr, nullptr);
+                if (r == kIOReturnSuccess) result = tx.result;
+            } else txChecksumFailures++;
         }
         if (result > 0) { txStalled++; break; } // callback takes no ownership of this packet; retry on next tick
         if (result == 0) txSent++; else txDropped++;
@@ -533,8 +577,9 @@ void itlmt7925WifiInterface::drainDatapath()
             IOSkywalkPacket *p = nullptr;
             IOReturn r = pool->allocatePacket(1, &p, 1); // no-sleep allocation on the native work loop
             if (r == kIOReturnSuccess && p) {
-                void *data = p->getDataVirtualAddress();
-                if (!data || p->getPacketBufferCount() != 1 || p->getBufferSize() < f.length)
+                bool single = p->getPacketBufferCount() == 1;
+                void *data = single ? p->getDataVirtualAddress() : nullptr;
+                if (!data || p->getBufferSize() < f.length)
                     r = kIOReturnNoSpace;
                 else {
                     memcpy(data, f.bytes, f.length);
@@ -561,6 +606,7 @@ void itlmt7925WifiInterface::drainDatapath()
         setProperty("itlmt_rx_delivered", (uint64_t)rxDelivered, 64);
         setProperty("itlmt_rx_drop", (uint64_t)dropped, 64);
         setProperty("itlmt_tx_pending", (uint64_t)pendingCount, 32);
+        setProperty("itlmt_tx_checksum_failed", (uint64_t)txChecksumFailures, 64);
     }
     dpTimer->setTimeoutMS(10);
 }
