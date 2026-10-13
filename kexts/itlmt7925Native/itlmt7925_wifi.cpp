@@ -615,6 +615,8 @@ static bool commandAllowed(int cmd)
     case 0x03: case 0x07: case 0x1c: case 0xcf: case 0xd8: case 0xff: case 0x103: case 0x17b: case 0x1aa: case 0x1bc:
     case 0x1c1: case 0x1c6: case 0x1cc: case 0x1eb: case 0x216:
     case 0x170: case 0x1ab: case 0x1be: case 0x1b7:
+    // round 19: what WCLNetManager::setCurrentBSS / linkUp / startProtectIp send once the family has the link
+    case 0x1f6: case 0x1b2: case 0x188: case 0x1b5: case 0x1bb: case 0x1ac:
         return true;
     default:
         return false;

@@ -1190,6 +1190,47 @@ IOReturn itlmt7925WifiInterface::getWCL_BSS_INFO(apple80211_beacon_msg *d)
     return kIOReturnSuccess;
 }
 
+// 0x1cc WCL_EXTENDED_BSS_INFO (0x1e0 bytes, asked by WCLNetManager::setCurrentBSS right after 0x1b1; any failure there aborts the
+// link-up and the family leaves the network itself - round 19 boot: `I:1b1 I:1cc I:1a9`). Layout from AppleBCMWLANNetAdapter::
+// getExtendedBssInfo (24H32): +0 apple80211_rate_set_data (0xbc), +0xbc mcs index set (16), +0xcc vht mcs set (8), +0xd4 he mcs
+// set (8), +0xdc u8 MLO connection, +0xdd 0x101 bytes of the associated WPA/RSN IEs. The core does not expose negotiated rate or
+// MCS sets and the layouts of the rate/MCS structures and of the IE blob are chưa xác định, so everything is reported empty
+// (no rates, no MCS, no MLO, no IEs).
+IOReturn itlmt7925WifiInterface::getWCL_EXTENDED_BSS_INFO(apple80211_extended_bss_info *d)
+{
+    itlmtCall(ctl, 'S', 530);
+    if (!d) return kIOReturnError;
+    bzero(d, 0x1e0);
+    if (extBssTraced++ < 4) itlmtTrace(ctl, "wcl:extended bss info answered (empty)");
+    return kIOReturnSuccess;
+}
+
+// 0x1f6 WCL_UPDATE_FAST_LANE (2 bytes, both the beacon's vtable+0x3a0 answer; setCurrentBSS fails when this SET fails). Fast lane
+// is a QoS marking for a peer feature this driver does not offer; accepted and recorded.
+IOReturn itlmt7925WifiInterface::setWCL_UPDATE_FAST_LANE(apple80211_fastlane *d)
+{
+    itlmtCall(ctl, 'S', 627);
+    if (!d) return kIOReturnBadArgument;
+    if (fastLaneTraced++ < 4) itlmtTrace(ctl, "wcl:fast lane %02x%02x", ((const uint8_t *)d)[0], ((const uint8_t *)d)[1]);
+    return kIOReturnSuccess;
+}
+
+// 0x1b2 WCL_TRAFFIC_COUNTERS (0x38 bytes, WCLNetManager::linkUp; the result is not checked). The core keeps no per-AC counters.
+IOReturn itlmt7925WifiInterface::getWCL_TRAFFIC_COUNTERS(apple80211_wcl_traffic_counters *d)
+{
+    itlmtCall(ctl, 'S', 523);
+    if (!d) return kIOReturnError;
+    bzero(d, 0x38);
+    return kIOReturnSuccess;
+}
+
+// Link-path SETs that configure features the core does not have (power-save mode, ARP-mode, QoS parameters for the protect-IP
+// window, roam lock); each is accepted and only recorded, as for 0x1be.
+IOReturn itlmt7925WifiInterface::setPM_MODE(apple80211_pm_mode *) { itlmtCall(ctl, 'S', 577); return kIOReturnSuccess; }
+IOReturn itlmt7925WifiInterface::setWCL_ARP_MODE(apple80211_wcl_arp_mode *) { itlmtCall(ctl, 'S', 591); return kIOReturnSuccess; }
+IOReturn itlmt7925WifiInterface::setWCL_QOS_PARAMS(apple80211_wcl_qos_params *) { itlmtCall(ctl, 'S', 596); return kIOReturnSuccess; }
+IOReturn itlmt7925WifiInterface::setWCL_SET_ROAM_LOCK(apple80211_set_roam_lock *) { itlmtCall(ctl, 'S', 585); return kIOReturnSuccess; }
+
 void itlmt7925WifiInterface::deliverScanResults()
 {
     ItlNativeNets n;

@@ -510,3 +510,43 @@ Corrected discarded M1 retransmissions and single-frame EAPOL RX mailbox; added 
 optional PMKID equality and a persistent `wifi-handshake` summary. Both kexts built, link/slot/OC checks passed and executables
 were staged on ESP with credentials/config preserved. Hardware result pending; the old logs cannot prove the exact failure cause.
 See [result and next observations](native-wifi-results/20261013-handshake-36e0da6/README.md).
+
+## Round 19 result and round 20 (2026-10-13): the family reached `linkUp`, then left because GET 0x1cc was refused
+
+### Result of the 36e0da6 + 370bf8e boot
+
+Call recorder / trace: `P:d8 P:4e P:d3 P:d4 P:d5`, then `I:1b1` (answered, `ch=149 ssidLen=18 ie=245`), `I:1cc` (stub:
+Unsupported), `I:1a9` (the family's own LEAVE_NETWORK, `assoc:leave=0`), `I:1c6 up=0`, `I:188`, `I:1b5`, then our `0xd8 up=0
+reason=1`. So 0xd8 works: the net-manager FSM reached `linkUp` -> `updateBss`. Core side the join itself was clean (PMKID
+match, M1..M4, `hs-ok`); the 36 `eapol rx dropped depth=8` lines are the AP retransmitting M3 after the family-ordered leave.
+
+### Cause (24H32 disassembly)
+
+`WCLNetManager::setCurrentBSS` (after `WCLBssManager::setCurrentBSS`) runs, each step aborting the function (and `updateBss`
+then issues `leaveNetworkCommand`) when it fails:
+
+1. GET 0x1cc WCL_EXTENDED_BSS_INFO, 0x1e0 bytes. Layout from `AppleBCMWLANNetAdapter::getExtendedBssInfo`: +0 rate set
+   (0xbc), +0xbc MCS index set (16), +0xcc VHT MCS set (8), +0xd4 HE MCS set (8), +0xdc u8 MLO, +0xdd 0x101 bytes of the
+   associated WPA/RSN IEs.
+2. `updateLinkState(1,1,1)` -> SET 0x1c6 (already handled).
+3. SET 0x1f6 WCL_UPDATE_FAST_LANE (2 bytes).
+
+Afterwards `linkUp` sends GET 0x1b2 TRAFFIC_COUNTERS (0x38 bytes, result ignored) and `startProtectIp` SET 0x1bb QOS_PARAMS
+(result ignored); the 5 s protect-IP timer posts the FSM's IPV4_STATUS event, so LINK_UP is reached even before an address is
+reported. `set4wayHsTimeout` only arms for EAP joins.
+
+### Change (`itlmt7925Native` only; core is the Codex build 370bf8e, unchanged)
+
+* 0x1cc answers success with the whole 0x1e0 buffer zeroed (the rate / MCS structure layouts and the IE blob format are chưa
+  xác định, so nothing is invented: no rates, no MCS, no MLO, no IEs).
+* 0x1f6, 0x188 PM_MODE, 0x1b5 ARP_MODE, 0x1bb QOS_PARAMS, 0x1ac SET_ROAM_LOCK: accepted and recorded; 0x1b2 answers zeros.
+  The allow-list gained 0x1f6 / 0x1b2 / 0x188 / 0x1b5 / 0x1bb / 0x1ac.
+* New trace lines: `wcl:extended bss info answered (empty)`, `wcl:fast lane <2 bytes>`.
+* Still refused: 0x55 SET IE, 0xbf/0xc0 OFFLOAD_ARP/NDP, 0x22d DRBG_ENTROPY, 0x3a, CHANNELS_INFO details.
+
+### One reboot, read in this order
+
+1. `ioreg -l -w0 | grep -E "itlmt_native_calls|itlmt_native_trace_tail"`: expect `I:1b1`, `I:1cc`, `I:1f6`, `S:20a`,
+   `S:212`, then `I:1c6 up=1`, `I:1bc`, `I:1b2`, and no `I:1a9` from the family (only on a real disconnect).
+2. Settings > Wi-Fi shows the network connected; `airportd` no longer logs `0xe0822403` for SSID.
+3. If the link is still left, the recorder's next `I:` after `I:1cc` names the new blocker.
