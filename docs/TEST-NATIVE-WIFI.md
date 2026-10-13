@@ -448,3 +448,11 @@ Round 18 adds diagnostics and recovery in the core (`itlmt7925`), so one boot gi
   and `recover #n rc=...`.
 
 Read after the reboot (no root needed): `ioreg -l -w0 | grep -E "wifi-postmortem|wifi-frames|wifi-events"`.
+
+## Result of round 18 (2026-10-13): link stable, internet over en4
+
+After the reboot the link stayed up through the point where round 17 died (about 35 s after link-up) and for more than
+5 minutes of use: 3 x 20 MB HTTP downloads over en4 (about 1.7 MB/s each, legacy level 0 / 6 Mb/s path), DNS to the
+gateway, ping 0 % loss. The post-mortem and recovery code never triggered (`wifi-postmortem` absent). The round-17 hang did
+not repeat; its cause stays chưa xác định (the previous boot had a root tcpdump + dig run on en4 at the time).
+Open: `itlmt_fast` is not set, so the link runs at `lvl 0 bw 0`; en1 (tether) is still the primary default route.
