@@ -223,3 +223,32 @@ Legacy ItlWiFi login agent is disabled for this experiment; its prior plist and 
   (first 32 distinct are recorded: the library's next requests after the bind are the next handlers to implement), and whether
   `networksetup -listallhardwareports` / CoreWLAN list en9. If still absent, the matching/user-client path airportd uses is the
   next thing to dump (not done).
+
+## Full-flow call recorder (`itlmt_native_calls`) — 2026-10-13, build after 19e4999 (not hardware-tested)
+
+Reason: a reboot is expensive and the old trace kept only the first 32 distinct ioctl IDs, nothing about GET/SET handlers or
+callers, no counters. The recorder keeps one table (160 entries, ~8 KiB text) published as the registry property
+`itlmt_native_calls` on the controller whenever an entry is new or its count reaches a power of two (so it is current at a panic-free
+shutdown and loses at most a doubling of a count). `native-wifi-test.sh logs` already greps `itlmt_native_` into `native-trace.txt`.
+
+Format: `<kind>:<hex id>[@<ra0>/<ra1>/<ra2>]x<count>;` ...
+
+| kind | what | id |
+|---|---|---|
+| `I` | controller `isCommandProhibited(cmd)`, every request, allowed or refused | ioctl number (0xc CARD_CAPABILITIES, 0x13 POWER, 0xd STATE, 0xe PHY_MODE, 0xf OP_MODE, 0x1b SUPPORTED_CHANNELS, 0x1c LOCALE, 0x2b DRIVER_VERSION, 0x2c HARDWARE_VERSION, 0x33 COUNTRY_CODE) |
+| `C` | controller handler actually reached (`getCARD_CAPABILITIES`, `getDRIVER_VERSION`, ...) | ioctl number; `0x8000000N` = set |
+| `H` | `handleCardSpecific` | cmd, `0x80000000` set bit = set |
+| `S` | interface protocol stub (one of the 191 unimplemented get/set handlers, all return unsupported) | vtable slot (467..656, see `round3/AppleBCMWLANSkywalkInterface.vtable.txt`) with 3 return addresses |
+| `U` / `u` | controller `newUserClient` entry / result | type (0x57694669 = 'WiFi' firmware loader); `u` id = `type << 16 | result & 0xffff` |
+| `W` / `w` | interface `newUserClient` entry / result | same as `U`/`u` |
+| `B` | `processBSDCommand` | ioctl command word |
+| `E` | interface `enable` / `disable` | 1 / 0 |
+
+`ra0/ra1/ra2` are the three return addresses above the recording function (for `I` the Family function that called
+`isCommandProhibited`, then its callers; for `S` the dispatcher above the stub), already corrected by the KASLR slide (runtime
+address of the exported `IO80211WorkQueue::workQueue` minus its static 0xffffff8002258fcc) and truncated to the low 32 bits: prefix
+`0xffffff80` is implied (`021f65a4` = `0xffffff80021f65a4`). Look them up with `tools/kc.py` (`kc.syms` nearest lower symbol) against
+the same KC hash. A zero means the frame walk stopped (bounded: 3 hops, 0x400 per hop, kernel addresses only).
+
+What it still cannot tell: payload contents or what userland did with an answer; that needs the userland log (`logs` now also
+collects `userland-wifi.log`, `airport-profile.txt`, `hardwareports.txt`).

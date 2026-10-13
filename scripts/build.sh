@@ -19,7 +19,7 @@ if [ ! -d "$SDK_DIR" ]; then
 fi
 
 # -nostdlibinc: only MacKernelSDK and clang's own headers (IOHIDDescriptorParser.h pulls <MacTypes.h> if the host SDK has one)
-COMMON="-arch x86_64 -mmacosx-version-min=12.0 -O2 -g -mkernel -fno-builtin -fno-stack-protector -nostdlib -nostdlibinc -ffreestanding -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -I$SDK_DIR/Headers"
+COMMON="-arch x86_64 -mmacosx-version-min=12.0 -O2 -g -fno-omit-frame-pointer -mkernel -fno-builtin -fno-stack-protector -nostdlib -nostdlibinc -ffreestanding -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -I$SDK_DIR/Headers"
 CXXFLAGS="-std=c++17 -fapple-kext -fno-exceptions -fno-rtti"     # -fapple-kext is C++ only
 # libkmodc++/libcc_kext come from the installed SDK (MacKernelSDK has only libkmod) and are built for that SDK's macOS.
 # Linking with a lower deployment target makes ld warn "built for newer macOS version"; link with the library's own

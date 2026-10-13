@@ -5,7 +5,7 @@
 
 The Family's request routing calls 190 pure virtuals of IO80211InfraProtocol (slots 467-656) plus IO80211SkywalkInterface::
 setMacAddress (slot 417, the 191st pure slot). A native interface must override every one of them or the class stays abstract.
-Stage 2 has no radio, so each handler answers kIOReturnUnsupported. The declarations are written from the header line by line
+Stage 2 has no radio, so each handler records the call (itlmtCall, kind 'S', id = slot) and answers kIOReturnUnsupported. The declarations are written from the header line by line
 (name, parameter list, slot comment), so a regenerated header regenerates the stubs.
 
   python3 tools/gen_native_iface.py            # rewrite the .inc
@@ -47,7 +47,8 @@ def render():
         if name in CUSTOM:
             continue
         # unnamed parameters: the body never touches them
-        o.append('%s itlmt7925WifiInterface::%s(%s) { return kIOReturnUnsupported; }' % (ret, name, params))
+        # every call is counted by slot (itlmtCall kind 'S'): which handlers userland really reaches is what the next round needs
+        o.append('%s itlmt7925WifiInterface::%s(%s) { itlmtCall(ctl, \'S\', %d); return kIOReturnUnsupported; }' % (ret, name, params, slot))
     o.append('#endif')
     return '\n'.join(o) + '\n'
 

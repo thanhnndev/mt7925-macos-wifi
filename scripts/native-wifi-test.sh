@@ -150,6 +150,10 @@ except Exception as error:
     (p / 'nvram-collection-error.txt').write_text(str(error))
 PY
   ifconfig -a | grep -E '^[a-z]+[0-9]+:' > "$o/interfaces.txt"
+  # userland side of the same boot: who binds the interface and what they say about it (may hold MACs: check before sharing)
+  networksetup -listallhardwareports > "$o/hardwareports.txt" 2>&1 || true
+  system_profiler SPAirPortDataType > "$o/airport-profile.txt" 2>&1 || true
+  log show --last boot --style compact --predicate 'process == "airportd" OR process == "wifid" OR process == "wifivelocityd" OR process == "WiFiAgent" OR process == "configd" OR process == "WirelessRadioManagerd" OR subsystem CONTAINS[c] "wifi" OR subsystem CONTAINS[c] "corewlan"' > "$o/userland-wifi.log" 2>&1 || true
   echo "$o (check for SSIDs/MACs before sharing)";;
 *) echo "usage: $0 backup | install <kext> [--stage a|b] [--exclusive] | restore [dir] | logs"; exit 2;;
 esac

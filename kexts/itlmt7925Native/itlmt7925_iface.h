@@ -20,6 +20,17 @@
 // not found in the collected logs of stage A/B, a registry property survives and is read with `ioreg -l`.
 void itlmtTrace(IORegistryEntry *e, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
+// Call recorder: one table of (kind, id, up to 3 caller addresses) -> count, published as the registry property
+// "itlmt_native_calls" of `e` whenever an entry is new or its count reaches a power of two, so it survives panic-free runs and
+// costs nothing on the hot path. kinds: 'I' controller isCommandProhibited(cmd) + 3 return addresses (kernel-slide corrected,
+// decode against the dumps), 'S' interface handler stub (id = vtable slot), 'C' controller handler (id: see itlmt7925_wifi.cpp),
+// 'U' newUserClient (id = type), 'B' BSD command. Init/free are called by the controller.
+void itlmtCallInit();
+void itlmtCallFree();
+void itlmtCall(IORegistryEntry *e, char kind, uint32_t id, const uint32_t *callers = nullptr);
+// Static (slide-free) low 32 bits of the three return addresses above the caller's frame; zeros where the walk is not safe.
+void itlmtCallers(uint32_t out[3], uintptr_t fp);
+
 class itlmt7925WifiInterface : public IO80211InfraProtocol {
     OSDeclareDefaultStructors(itlmt7925WifiInterface)
 
@@ -40,6 +51,8 @@ public:
     void setInterfaceEnable(bool enabled) override;
     uint32_t getHardwareAssists() override;
     IOReturn processBSDCommand(__ifnet *netif, uint32_t command, void *data) override;
+    IOReturn newUserClient(task_t task, void *securityID, UInt32 type, OSDictionary *properties, IOUserClient **handler) override;
+    using IO80211InfraProtocol::newUserClient;
 
     // Accessors the Family calls on its interface (IO80211SkywalkInterface slots 418-439; AppleBCMWLANSkywalkInterface overrides them)
     CCLogStream *getLogger() const override;

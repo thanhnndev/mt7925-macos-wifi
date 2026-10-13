@@ -50,6 +50,9 @@ public:
     IOReturn getCOUNTRY_CODE(IO80211SkywalkInterface *i, apple80211_country_code_data *d) override;
     IOReturn setCOUNTRY_CODE(IO80211SkywalkInterface *i, apple80211_country_code_data *d) override;
     IOReturn setGET_DEBUG_INFO(IO80211SkywalkInterface *i, apple80211_debug_command *d) override;
+    // Slot 240 (IOService's own); recorded only: which user-client types userland opens on the controller, and the result.
+    IOReturn newUserClient(task_t task, void *securityID, UInt32 type, OSDictionary *properties, IOUserClient **handler) override;
+    using IO80211Controller::newUserClient;
 
 private:
     uint32_t tracedCommands[32] = {};
@@ -184,6 +187,7 @@ bool itlmt7925Wifi::start(IOService *provider)
         IOLog(LOGT "idle (boot-arg itlmt_native not set)\n");
         return false;
     }
+    itlmtCallInit();
     itlmtTrace(this, "ctl:start");
     itlmtTrace(this, "ctl:createWorkQueue begin");
     if (!createWorkQueue()) {
@@ -387,6 +391,7 @@ void itlmt7925Wifi::free()
     rel(logPipe);     logPipe = nullptr;
     rel(wq);          wq = nullptr;
     rel(loop);        loop = nullptr;
+    itlmtCallFree();
     super::free();
 }
 
@@ -450,6 +455,10 @@ static bool commandAllowed(int cmd)
 
 IOReturn itlmt7925Wifi::isCommandProhibited(int cmd)
 {
+    // every request, with the three return addresses above this frame (decode against the dumps: docs/TEST-NATIVE-WIFI.md)
+    uint32_t callers[3];
+    itlmtCallers(callers, (uintptr_t)__builtin_frame_address(0));
+    itlmtCall(this, 'I', (uint32_t)cmd, callers);
     bool seen = false;
     for (uint32_t n = 0; n < tracedCommandCount; n++) if (tracedCommands[n] == (uint32_t)cmd) seen = true;
     if (!seen && tracedCommandCount < 32) {
@@ -463,8 +472,9 @@ IOReturn itlmt7925Wifi::isCommandProhibited(int cmd)
     return kProhibited;
 }
 
-IOReturn itlmt7925Wifi::handleCardSpecific(IO80211SkywalkInterface *, unsigned long, void *, bool)
+IOReturn itlmt7925Wifi::handleCardSpecific(IO80211SkywalkInterface *, unsigned long cmd, void *, bool set)
 {
+    itlmtCall(this, 'H', (uint32_t)cmd | (set ? 0x80000000u : 0));
     return kIOReturnUnsupported;
 }
 
@@ -492,11 +502,13 @@ static IOReturn fillVersion(apple80211_version_data *data, const char *text)
 
 IOReturn itlmt7925Wifi::getDRIVER_VERSION(IO80211SkywalkInterface *, apple80211_version_data *d)
 {
+    itlmtCall(this, 'C', 0x2b);
     return fillVersion(d, "itlmt7925Native 0.1");
 }
 
 IOReturn itlmt7925Wifi::getHARDWARE_VERSION(IO80211SkywalkInterface *, apple80211_version_data *d)
 {
+    itlmtCall(this, 'C', 0x2c);
     return fillVersion(d, "MediaTek MT7925");
 }
 
@@ -512,6 +524,7 @@ IOReturn itlmt7925Wifi::getHARDWARE_VERSION(IO80211SkywalkInterface *, apple8021
 // chip revision or radio state (about 100 bits) stays clear: we claim nothing we cannot back.
 IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple80211_capability_data *data)
 {
+    itlmtCall(this, 'C', 0x0c);
     if (!data)
         return kIOReturnBadArgument;
     uint8_t *d = (uint8_t *)data;
@@ -535,25 +548,38 @@ IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple802
 
 IOReturn itlmt7925Wifi::getPOWER(IO80211SkywalkInterface *, apple80211_power_data *)
 {
+    itlmtCall(this, 'C', 0x13);
     return kIOReturnUnsupported;
 }
 
 IOReturn itlmt7925Wifi::setPOWER(IO80211SkywalkInterface *, apple80211_power_data *)
 {
+    itlmtCall(this, 'C', 0x80000013);
     return kIOReturnUnsupported;
 }
 
 IOReturn itlmt7925Wifi::getCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *)
 {
+    itlmtCall(this, 'C', 0x33);
     return kIOReturnUnsupported;
 }
 
 IOReturn itlmt7925Wifi::setCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *)
 {
+    itlmtCall(this, 'C', 0x80000033);
     return kIOReturnUnsupported;
 }
 
 IOReturn itlmt7925Wifi::setGET_DEBUG_INFO(IO80211SkywalkInterface *, apple80211_debug_command *)
 {
+    itlmtCall(this, 'C', 0x80000f00);       // chưa xác định ioctl number: marker for "setGET_DEBUG_INFO"
     return kIOReturnUnsupported;
+}
+
+IOReturn itlmt7925Wifi::newUserClient(task_t task, void *securityID, UInt32 type, OSDictionary *properties, IOUserClient **handler)
+{
+    itlmtCall(this, 'U', type);
+    IOReturn r = super::newUserClient(task, securityID, type, properties, handler);
+    itlmtCall(this, 'u', (type << 16) | ((uint32_t)r & 0xffff));
+    return r;
 }

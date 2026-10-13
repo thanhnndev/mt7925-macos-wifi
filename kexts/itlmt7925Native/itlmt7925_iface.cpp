@@ -91,6 +91,133 @@ void itlmtTrace(IORegistryEntry *e, const char *fmt, ...)
     }
 }
 
+namespace {
+
+struct CallEntry {
+    uint32_t id, count;
+    uint32_t caller[3];
+    char kind;
+};
+const uint32_t kCallCap = 160;
+const size_t kCallText = 8192;
+CallEntry *gCalls = nullptr;
+uint32_t gCallN = 0, gCallOverflow = 0;
+char *gCallText = nullptr;
+IOLock *gCallLock = nullptr;
+
+// Static address of an exported Family function (ABI-2: IO80211WorkQueue::workQueue); runtime minus this = KASLR slide.
+const uint64_t kWorkQueueStatic = 0xffffff8002258fccull;
+
+}
+
+void itlmtCallInit()
+{
+    if (gCallLock) return;
+    gCalls = (CallEntry *)IOMalloc(sizeof(CallEntry) * kCallCap);
+    gCallText = (char *)IOMalloc(kCallText);
+    gCallLock = IOLockAlloc();
+    if (!gCalls || !gCallText || !gCallLock) {
+        // recorder stays off: itlmtCall checks gCallLock
+        if (gCallLock) { IOLockFree(gCallLock); gCallLock = nullptr; }
+        if (gCalls) { IOFree(gCalls, sizeof(CallEntry) * kCallCap); gCalls = nullptr; }
+        if (gCallText) { IOFree(gCallText, kCallText); gCallText = nullptr; }
+        return;
+    }
+    bzero(gCalls, sizeof(CallEntry) * kCallCap);
+    gCallText[0] = 0;
+}
+
+void itlmtCallFree()
+{
+    IOLock *l = gCallLock;
+    if (!l) return;
+    IOLockLock(l);
+    gCallLock = nullptr;
+    CallEntry *c = gCalls; gCalls = nullptr;
+    char *t = gCallText; gCallText = nullptr;
+    IOLockUnlock(l);
+    IOLockFree(l);
+    if (c) IOFree(c, sizeof(CallEntry) * kCallCap);
+    if (t) IOFree(t, kCallText);
+}
+
+// Walks at most three saved-frame links above `fp` (the frame of the function that wants the callers). A link is accepted
+// only when it lies a few hundred bytes above the previous one inside the same thread stack; anything else stops the walk
+// (the recorder must never fault).
+void itlmtCallers(uint32_t out[3], uintptr_t fp)
+{
+    out[0] = out[1] = out[2] = 0;
+    if (fp < 0xffffff8000000000ull || (fp & 7)) return;     // kernel stack addresses only
+    uint64_t slide = (uint64_t)(uintptr_t)&IO80211WorkQueue::workQueue - kWorkQueueStatic;
+    uintptr_t start = fp;
+    for (int i = 0; i < 3; i++) {
+        uintptr_t *f = (uintptr_t *)fp;
+        uintptr_t ra = f[1];
+        out[i] = (uint32_t)((uint64_t)ra - slide);
+        uintptr_t next = f[0];
+        if (next <= fp || next - fp > 0x400 || next - start > 0x1800 || (next & 7) || next < 0xffffff8000000000ull) return;
+        fp = next;
+    }
+}
+
+void itlmtCall(IORegistryEntry *e, char kind, uint32_t id, const uint32_t *callers)
+{
+    if (!e || !gCallLock) return;
+    uint32_t walked[3];
+    if (!callers && kind == 'S') {
+        // interface stubs: the three return addresses above the stub (the Family dispatcher that asked for the property)
+        uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+        itlmtCallers(walked, fp ? *(uintptr_t *)fp : 0);
+        callers = walked;
+    }
+    IOLockLock(gCallLock);
+    if (!gCalls || !gCallText) { IOLockUnlock(gCallLock); return; }
+    CallEntry *hit = nullptr;
+    for (uint32_t n = 0; n < gCallN; n++) {
+        CallEntry &c = gCalls[n];
+        if (c.kind == kind && c.id == id &&
+            (!callers || (c.caller[0] == callers[0] && c.caller[1] == callers[1] && c.caller[2] == callers[2]))) {
+            hit = &c;
+            break;
+        }
+    }
+    bool publish = false;
+    if (hit) {
+        hit->count++;
+        publish = (hit->count & (hit->count - 1)) == 0;     // 2, 4, 8, ...
+    } else if (gCallN < kCallCap) {
+        hit = &gCalls[gCallN++];
+        hit->kind = kind;
+        hit->id = id;
+        hit->count = 1;
+        for (int i = 0; i < 3; i++) hit->caller[i] = callers ? callers[i] : 0;
+        publish = true;
+    } else {
+        gCallOverflow++;
+        publish = (gCallOverflow & (gCallOverflow - 1)) == 0;
+    }
+    if (publish) {
+        size_t len = 0;
+        for (uint32_t n = 0; n < gCallN && len + 64 < kCallText; n++) {
+            const CallEntry &c = gCalls[n];
+            int w = snprintf(gCallText + len, kCallText - len, "%c:%x", c.kind, c.id);
+            if (w < 0) break;
+            len += (size_t)w;
+            if (c.caller[0]) {
+                w = snprintf(gCallText + len, kCallText - len, "@%08x/%08x/%08x", c.caller[0], c.caller[1], c.caller[2]);
+                if (w < 0) break;
+                len += (size_t)w;
+            }
+            w = snprintf(gCallText + len, kCallText - len, "x%u;", c.count);
+            if (w < 0) break;
+            len += (size_t)w;
+        }
+        if (gCallOverflow) snprintf(gCallText + len, kCallText - len, "ovf=%u", gCallOverflow);
+        e->setProperty("itlmt_native_calls", gCallText);
+    }
+    IOLockUnlock(gCallLock);
+}
+
 itlmt7925WifiInterface *itlmt7925WifiInterface::withController(IO80211Controller *controller, uint32_t ifId, uint32_t role)
 {
     // Same steps as AppleBCMWLANSkywalkInterface::initWithProviderAndParameters: init(), setInterfaceRole, setInterfaceId, attach
@@ -120,6 +247,7 @@ bool itlmt7925WifiInterface::init()
 {
     if (!super::init()) return false;
     rxLock = IOLockAlloc();
+    itlmtCallInit();            // idempotent; the controller initialises it first, this covers a stand-alone interface
     return rxLock != nullptr;
 }
 
@@ -391,6 +519,7 @@ IOReturn itlmt7925WifiInterface::disableDatapath()
 
 IOReturn itlmt7925WifiInterface::enable(uint32_t options)
 {
+    itlmtCall(ctl, 'E', 1);
     itlmtTrace(ctl, "if:enable begin options=%x", options);
     IOReturn result = IO80211InfraProtocol::enable(options);
     if (result == kIOReturnSuccess && bound) result = enableDatapath();
@@ -400,6 +529,7 @@ IOReturn itlmt7925WifiInterface::enable(uint32_t options)
 
 IOReturn itlmt7925WifiInterface::disable(uint32_t options)
 {
+    itlmtCall(ctl, 'E', 0);
     itlmtTrace(ctl, "if:disable begin options=%x", options);
     disableDatapath();
     IOReturn result = IO80211InfraProtocol::disable(options);
@@ -407,11 +537,21 @@ IOReturn itlmt7925WifiInterface::disable(uint32_t options)
     return result;
 }
 
+// Which user-client types userland (airportd, CoreWLAN, wifivelocityd) opens on the interface, and what the Family answers.
+IOReturn itlmt7925WifiInterface::newUserClient(task_t task, void *securityID, UInt32 type, OSDictionary *properties, IOUserClient **handler)
+{
+    itlmtCall(ctl, 'W', type);
+    IOReturn r = super::newUserClient(task, securityID, type, properties, handler);
+    itlmtCall(ctl, 'w', (type << 16) | ((uint32_t)r & 0xffff));
+    return r;
+}
+
 IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t command, void *data)
 {
     bool media = command == 0xc02c6938 || command == 0xc0286938;
     uint32_t index = command == 0xc0286938 ? 1 : 0;
     bool firstMedia = media && !mediaTraced[index];
+    itlmtCall(ctl, 'B', command);
     if (firstMedia || command == 0x80206910)
         itlmtTrace(ctl, "if:bsd cmd=%x begin", command);
     IOReturn result = IO80211InfraProtocol::processBSDCommand(netif, command, data);
