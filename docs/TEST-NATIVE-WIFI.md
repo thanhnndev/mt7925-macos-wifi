@@ -252,3 +252,55 @@ the same KC hash. A zero means the frame walk stopped (bounded: 3 hops, 0x400 pe
 
 What it still cannot tell: payload contents or what userland did with an answer; that needs the userland log (`logs` now also
 collects `userland-wifi.log`, `airport-profile.txt`, `hardwareports.txt`).
+
+## IOSkywalkLegacyEthernet shim + first real ioctl handlers — 2026-10-13, build after ef42853 (not hardware-tested)
+
+### What the ef42853 boot established
+
+* The recorder (see above) showed userland reaching the interface: `0x2c/0x2b` (versions), `0xc` (x37, answered), then `0x13` POWER (x71,
+  polled), `0x33` COUNTRY_CODE, `0x1c` LOCALE, `0x5` POWERSAVE, `0xf` OP_MODE (x20), `0x4` CHANNEL, `0x10` RSSI, `0x1b`
+  SUPPORTED_CHANNELS (x12), `0xcf` CHANNELS_INFO, `0xd8` ROAM_PROFILE, `0x103` MAX_NSS_FOR_APP, set `0x16b` USB_HOST_NOTIFICATION,
+  `0x1d5` OS_FEATURE_FLAGS, `0x200` INFRA_ENUMERATED, and `0x216` (not identified). All but 0xc/0x2b/0x2c were still refused.
+* `SCNetworkInterfaceCopyAll()` and configd's InterfaceNamer enumerate only `IONetworkInterface` objects (via IONetworkStack). Our
+  interface is an `IOSkywalkEthernetInterface` (not an `IONetworkInterface`), so en9 existed as a BSD interface but not for
+  SystemConfiguration.
+
+### Mechanism (from Apple's own 24H32 disassembly, read-only)
+
+`IOSkywalkFamily` carries a personality `IOSkywalkLegacyEthernet` (`IOProviderClass` = `IOSkywalkEthernetInterface`,
+`IOMatchCategory` = `IOSkywalkLegacyEthernet`): an `IOEthernetController` shim whose `createInterface()` builds an
+`IOSkywalkLegacyEthernetInterface` (an `IOEthernetInterface`, i.e. an `IONetworkInterface`, with `IOClassNameOverride`). Its
+`probe()` refuses a provider that already has `IOInterfaceUnit`. Our controller pre-assigned the unit (RegistrationInfo +0x38 = 9) so
+the shim never matched. Apple's own role-1 interface leaves +0x38 = 0xFFFFFFFF; the unit is assigned later by IONetworkStack /
+configd through the shim's `attachToDataLinkLayer`, which sets `IOInterfaceUnit` on the provider and re-registers it, after which
+`IOSkywalkNetworkBSDClient::start` names the BSD interface.
+
+### Change
+
+* `makeInterface`: role 1 no longer writes the unit; `itlmt_native_unit=N` (explicit mode) and role 2 are unchanged.
+* Watcher (own IOWorkLoop + IOTimerEventSource, 5 s ticks, `unit:*` trace lines, overwritten property `itlmt_native_shim`): records every
+  `IONetworkInterface` in the registry (class / `BSD Name` / unit) and the registry children of our interface. If no `IOInterfaceUnit`
+  appears within `itlmt_native_unit_wait` seconds (default 45; 0 disables the fallback) it applies the previous behaviour
+  (`IOInterfaceUnit` = `itlmt_native_unit_fb`, default 9, then `registerService`) so the BSD interface still comes up. Trace line
+  `unit:none after ...` means the fallback fired, i.e. the shim did not match.
+* Handlers with layouts taken from Apple's `AppleBCMWLANCore` (addresses in the source): controller `getPOWER` ([+4]=1, [+8]=state, the
+  state is what userland set, initially 0), `setPOWER` (recorded only: no firmware), `getCOUNTRY_CODE` / `setCOUNTRY_CODE` (3 bytes at
+  +4, initially Apple's "XZ" = unknown); interface `getCHANNEL` (0xe0822801 while the link is down), `getPOWERSAVE` ([+4]=0), `getRATE` /
+  `getRSSI` (0xe0822403 = not associated), `getOP_MODE` ({1, 0}), `setUSB_HOST_NOTIFICATION`, `setOS_FEATURE_FLAGS` (qword stored),
+  `setINFRA_ENUMERATED` (0). While the core reports its link up the value getters return unsupported rather than an invented answer.
+* Allowed commands: 0x4, 0x5, 0x8, 0xc, 0xf, 0x10, 0x13, 0x2b, 0x2c, 0x33, 0x16b, 0x1d5, 0x200. Still refused (data comes from firmware
+  tables this driver has not): 0x1b, 0xcf, 0xd8, 0x103, 0x1c, 0x216.
+* `itlmtTrace`: once the 1500-byte prefix is full, entries now append to `itlmt_native_trace_tail` instead of replacing it.
+
+### Checks (host-only)
+
+`scripts/build.sh itlmt7925Native` ok; `check_kext_links.py` only the 6 baseline-missing symbols; `check_native_slots.py`:
+interface 215/0, controller 23/0; `gen_native_iface.py --check` ok.
+
+### One reboot, read in this order
+
+1. `ioreg -l | grep itlmt_native_shim` — an `IOSkywalkLegacyEthernetInterface`/`IOEthernetInterface` entry with a `BSD Name`
+   and `u=` is the shim worked (then `networksetup -listallhardwareports`, CoreWLAN, System Settings should list it as Wi-Fi).
+2. `unit:assigned t=..s fb=0` (shim) / `unit:none after 45s` + `fb=1` (shim did not match; send the `first` snapshot).
+3. `itlmt_native_calls`: which `I:` ids remain refused, which `S:` slots (467+) are reached next.
+4. `ifconfig` for the BSD name chosen by IONetworkStack (not necessarily en9).

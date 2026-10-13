@@ -17,6 +17,9 @@
 #include "itlmt7925_iface.h"
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IORegistryEntry.h>
+#include <IOKit/IOWorkLoop.h>
 #include <IOKit/network/IONetworkMedium.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
@@ -64,6 +67,26 @@ private:
     bool makeFaultReporter(IOService *owner);
     bool makeInterface(IOService *provider);
     void dropInterface();
+
+    // Apple's IOSkywalkLegacyEthernet shim (IOSkywalkFamily personality, IOProviderClass IOSkywalkEthernetInterface) is what turns
+    // a Skywalk Ethernet interface into the IONetworkInterface that SystemConfiguration / configd's InterfaceNamer enumerate. Its
+    // probe() refuses a provider that already carries IOInterfaceUnit, so role 1 leaves the unit unassigned and lets the shim's
+    // IONetworkStack registration assign it. This watcher records what happens (registry property itlmt_native_shim) and, if no
+    // unit shows up within itlmt_native_unit_wait seconds (default 45, 0 = no fallback), applies the previous behaviour
+    // (IOInterfaceUnit = itlmt_native_unit_fb, default 9, + registerService) so the BSD interface still comes up.
+    void unitWatchStart();
+    void unitWatchStop();
+    void unitCheck();
+    void snapshotNetworkInterfaces(const char *tag);
+    static void unitTick(OSObject *owner, IOTimerEventSource *);
+    IOWorkLoop *unitLoop = nullptr;
+    IOTimerEventSource *unitTimer = nullptr;
+    uint32_t unitTicks = 0, unitWaitSec = 45, unitFallback = 9;
+    bool unitSeen = false, unitFellBack = false;
+
+    // state of the idle radio as userland sees it (no firmware behind it: values are only what userland itself set)
+    uint32_t powerState = 0;                // apple80211_power_data +8
+    uint8_t countryCode[3] = {'X', 'Z', 0}; // Apple's own "unknown country" code (the string the core compares against)
 
     IO80211WorkQueue *wq = nullptr;
     bool started = false;                   // IO80211Controller::start returned (getWorkLoop mode 1 switches to wq after it)
@@ -326,11 +349,13 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
     put<uint32_t>(block, 0x0c, 3);
     put<uint16_t>(block, 0x3c, 0x40);
     if (role == 1) put<uint32_t>(block, 0x10, 1);       // createSkywalkInterface: [info+0x10] = 1 for role 1 (meaning chưa xác định)
-    // Role 1: initRegistrationInfo leaves +0x38 = 0xFFFFFFFF (unit not assigned yet) and registerNetworkInterface only sets
-    // IOInterfaceUnit for unit >= 0, so without it IOSkywalkNetworkBSDClient::start never finds IOInterfaceUnit and cannot attach.
-    // The prefix stays the Ethernet default ("en"). Role 2 keeps the explicit prefix/flags Apple passes.
-    put<uint32_t>(block, 0x38, unit);
+    // Role 1: initRegistrationInfo leaves +0x38 = 0xFFFFFFFF (unit not assigned) and registerNetworkInterface only sets
+    // IOInterfaceUnit for unit >= 0. That is Apple's own state for its interface: the IOSkywalkLegacyEthernet shim (see unitCheck)
+    // assigns the unit when it publishes the IONetworkInterface. A pre-assigned unit made its probe() refuse (build ef42853: en9
+    // existed as a Skywalk BSD interface but SystemConfiguration listed nothing). itlmt_native_unit still forces the old explicit
+    // behaviour; role 2 keeps the explicit prefix/flags Apple passes.
     if (role == 2 || explicitName) {
+        put<uint32_t>(block, 0x38, unit);
         put<uint32_t>(block, 0x40, 4);
         put<uint64_t>(block, 0x30, (uint64_t)(uintptr_t)kPrefix);
     }
@@ -361,11 +386,126 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
         IOReturn dr = ifc->deferBSDAttach(false);
         itlmtTrace(this, "mk:deferBSDAttach(false)=%x", dr);
     }
+    if (role == 1 && !explicitName) unitWatchStart();
     return true;
+}
+
+// ---- unit watcher / fallback -----------------------------------------------------------------------------------------------
+
+// One snapshot of every IONetworkInterface in the registry (class, BSD name, unit) and of the registry children of our Skywalk
+// interface, as a single overwritten property so it can never fill the append-only trace.
+void itlmt7925Wifi::snapshotNetworkInterfaces(const char *tag)
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s t=%us:", tag, unitTicks * 5);
+    OSDictionary *match = IOService::serviceMatching("IONetworkInterface");
+    OSIterator *it = match ? IOService::getMatchingServices(match) : nullptr;
+    if (match) match->release();
+    if (it) {
+        int n = 0;
+        while (OSObject *o = it->getNextObject()) {
+            IOService *s = OSDynamicCast(IOService, o);
+            if (!s || n >= 8) continue;
+            n++;
+            OSString *bs = OSDynamicCast(OSString, s->getProperty("BSD Name"));
+            OSNumber *un = OSDynamicCast(OSNumber, s->getProperty("IOInterfaceUnit"));
+            char one[96];
+            snprintf(one, sizeof(one), " [%s %s u=%d]", s->getMetaClass()->getClassName(), bs ? bs->getCStringNoCopy() : "-",
+                     un ? (int)un->unsigned32BitValue() : -1);
+            strlcat(buf, one, sizeof(buf));
+        }
+        it->release();
+    }
+    if (iface) {
+        OSNumber *u = OSDynamicCast(OSNumber, iface->getProperty("IOInterfaceUnit"));
+        OSObject *d = iface->getProperty("IODeferBSDAttach");
+        char one[96];
+        snprintf(one, sizeof(one), " | skywalk unit=%d defer=%s", u ? (int)u->unsigned32BitValue() : -1, d ? "y" : "n");
+        strlcat(buf, one, sizeof(buf));
+        if (IORegistryIterator *ri = IORegistryIterator::iterateOver(iface, gIOServicePlane, kIORegistryIterateRecursively)) {
+            int n = 0;
+            while (IORegistryEntry *e = ri->getNextObject()) {
+                if (n++ >= 6) break;
+                char one2[64];
+                snprintf(one2, sizeof(one2), " >%s", e->getMetaClass()->getClassName());
+                strlcat(buf, one2, sizeof(buf));
+            }
+            ri->release();
+        }
+    }
+    setProperty("itlmt_native_shim", buf);
+    IOLog(LOGT "%s\n", buf);
+}
+
+void itlmt7925Wifi::unitTick(OSObject *owner, IOTimerEventSource *)
+{
+    itlmt7925Wifi *self = (itlmt7925Wifi *)owner;
+    if (self) self->unitCheck();
+}
+
+void itlmt7925Wifi::unitCheck()
+{
+    itlmt7925WifiInterface *ifc = iface;
+    if (!ifc || !unitTimer) return;
+    unitTicks++;
+    bool hasUnit = ifc->getProperty("IOInterfaceUnit") != nullptr;
+    if (hasUnit && !unitSeen) {
+        unitSeen = true;
+        itlmtTrace(this, "unit:assigned t=%us fb=%d", unitTicks * 5, unitFellBack);
+        snapshotNetworkInterfaces("assigned");
+        return;                              // done: no further ticks
+    }
+    if (unitTicks == 1) snapshotNetworkInterfaces("first");
+    if (!unitSeen && !unitFellBack && unitWaitSec && unitTicks * 5 >= unitWaitSec) {
+        unitFellBack = true;
+        itlmtTrace(this, "unit:none after %us, explicit unit %u", unitTicks * 5, unitFallback);
+        if (OSNumber *n = OSNumber::withNumber((uint64_t)unitFallback, 32)) {
+            ifc->setProperty("IOInterfaceUnit", n);
+            n->release();
+        }
+        ifc->registerService(kIOServiceAsynchronous);
+    }
+    if (unitTicks >= 40) {                   // 200 s: stop whatever happened
+        snapshotNetworkInterfaces("final");
+        return;
+    }
+    unitTimer->setTimeoutMS(5000);
+}
+
+void itlmt7925Wifi::unitWatchStart()
+{
+    if (unitTimer) return;
+    PE_parse_boot_argn("itlmt_native_unit_wait", &unitWaitSec, sizeof(unitWaitSec));
+    PE_parse_boot_argn("itlmt_native_unit_fb", &unitFallback, sizeof(unitFallback));
+    unitLoop = IOWorkLoop::workLoop();
+    if (unitLoop) unitTimer = IOTimerEventSource::timerEventSource(this, (IOTimerEventSource::Action)&itlmt7925Wifi::unitTick);
+    if (!unitLoop || !unitTimer || unitLoop->addEventSource(unitTimer) != kIOReturnSuccess) {
+        itlmtTrace(this, "unit:watcher unavailable");
+        unitWatchStop();
+        return;
+    }
+    unitTicks = 0;
+    unitTimer->setTimeoutMS(5000);
+    itlmtTrace(this, "unit:watch wait=%us fb=%u", unitWaitSec, unitFallback);
+}
+
+void itlmt7925Wifi::unitWatchStop()
+{
+    if (unitTimer) {
+        unitTimer->cancelTimeout();
+        if (unitLoop) unitLoop->removeEventSource(unitTimer);
+        unitTimer->release();
+        unitTimer = nullptr;
+    }
+    if (unitLoop) {
+        unitLoop->release();
+        unitLoop = nullptr;
+    }
 }
 
 void itlmt7925Wifi::dropInterface()
 {
+    unitWatchStop();
     if (!iface) return;
     itlmt7925WifiInterface *ifc = iface;
     iface = nullptr;
@@ -448,9 +588,21 @@ IO80211FaultReporter *itlmt7925Wifi::getFaultReporterFromDriver()
 // the version pair and getting 0x3a (registry: `ioctl:cmd=c prohibited`, `itlmt_ioctl_rejected` in the thousands while the
 // interface was otherwise up). Apple's client library asks DRIVER_VERSION then CARD_CAPABILITIES when it binds an interface;
 // a refusal there ends the bind before CoreWLAN lists the device.
+//
+// Round 14 (the boot after ef42853 showed what airportd/CoreWLAN ask for once the interface exists: 0x13 POWER x71, 0x33
+// COUNTRY_CODE, 0xf OP_MODE x20, 0x1b, 4, 5, 0x10, 0x103, 0xcf, 0xd8, 0x16b, 0x1d5, 0x200) the commands that now have a handler
+// with an Apple-derived layout are let through: POWER and COUNTRY_CODE on the controller; CHANNEL, POWERSAVE, RATE, OP_MODE, RSSI,
+// USB_HOST_NOTIFICATION, OS_FEATURE_FLAGS and INFRA_ENUMERATED on the interface. 0x1b/0xcf/0xd8/0x103 stay refused (their data
+// comes from firmware tables this driver does not have; nothing is invented for them).
 static bool commandAllowed(int cmd)
 {
-    return cmd == 0x0c || cmd == 0x2b || cmd == 0x2c;
+    switch (cmd) {
+    case 0x04: case 0x05: case 0x08: case 0x0c: case 0x0f: case 0x10: case 0x13: case 0x16b: case 0x1d5: case 0x200:
+    case 0x2b: case 0x2c: case 0x33:
+        return true;
+    default:
+        return false;
+    }
 }
 
 IOReturn itlmt7925Wifi::isCommandProhibited(int cmd)
@@ -546,28 +698,58 @@ IOReturn itlmt7925Wifi::getCARD_CAPABILITIES(IO80211SkywalkInterface *, apple802
     return kIOReturnSuccess;
 }
 
-IOReturn itlmt7925Wifi::getPOWER(IO80211SkywalkInterface *, apple80211_power_data *)
+// AppleBCMWLANCore::getPOWER (0xffffff80015f238a): [data+8] = current power state, [data+4] = 1, returns 0. The state lives in
+// the core context; here it is only what userland last set (setPOWER), initially 0 (off: the radio is idle).
+IOReturn itlmt7925Wifi::getPOWER(IO80211SkywalkInterface *, apple80211_power_data *data)
 {
     itlmtCall(this, 'C', 0x13);
-    return kIOReturnUnsupported;
+    if (!data) return kIOReturnBadArgument;
+    uint8_t *d = (uint8_t *)data;
+    put<uint32_t>(d, 0x08, powerState);
+    put<uint32_t>(d, 0x04, 1);
+    return kIOReturnSuccess;
 }
 
-IOReturn itlmt7925Wifi::setPOWER(IO80211SkywalkInterface *, apple80211_power_data *)
+// AppleBCMWLANCore::setPOWER (0xffffff800160d63e) compares [data+8] with the state it holds at core+0x4cd4, returns 0 when equal,
+// otherwise runs handlePowerStateChange and posts a message to the interface. There is no firmware here, so the request is only
+// recorded; it neither starts nor stops anything.
+IOReturn itlmt7925Wifi::setPOWER(IO80211SkywalkInterface *, apple80211_power_data *data)
 {
     itlmtCall(this, 'C', 0x80000013);
-    return kIOReturnUnsupported;
+    if (!data) return kIOReturnBadArgument;
+    uint32_t want;
+    memcpy(&want, (const uint8_t *)data + 8, sizeof(want));
+    if (want != powerState) {
+        powerState = want;
+        itlmtTrace(this, "ioctl:setPOWER=%u (recorded only)", want);
+    }
+    return kIOReturnSuccess;
 }
 
-IOReturn itlmt7925Wifi::getCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *)
+// AppleBCMWLANCore::getCOUNTRY_CODE (0xffffff800162c94c): three bytes of the stored code copied to data+4..+6, returns 0.
+// The stored code starts as "XZ", the string getCHANNELS_INFO compares against for "no country set".
+IOReturn itlmt7925Wifi::getCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *data)
 {
     itlmtCall(this, 'C', 0x33);
-    return kIOReturnUnsupported;
+    if (!data) return kIOReturnBadArgument;
+    memcpy((uint8_t *)data + 4, countryCode, sizeof(countryCode));
+    return kIOReturnSuccess;
 }
 
-IOReturn itlmt7925Wifi::setCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *)
+// setCOUNTRY_CODE in Apple's core (0xffffff8001611aba) pushes the code to firmware and rebuilds the channel list; this driver
+// has neither, so the code is stored and returned by getCOUNTRY_CODE and nothing else changes.
+IOReturn itlmt7925Wifi::setCOUNTRY_CODE(IO80211SkywalkInterface *, apple80211_country_code_data *data)
 {
     itlmtCall(this, 'C', 0x80000033);
-    return kIOReturnUnsupported;
+    if (!data) return kIOReturnBadArgument;
+    const uint8_t *d = (const uint8_t *)data + 4;
+    if (memcmp(countryCode, d, sizeof(countryCode)) != 0) {
+        memcpy(countryCode, d, sizeof(countryCode));
+        char cc[4] = {(char)d[0], (char)d[1], (char)d[2], 0};
+        for (int i = 0; i < 3; i++) if (cc[i] && (cc[i] < 0x20 || cc[i] > 0x7e)) cc[i] = '?';
+        itlmtTrace(this, "ioctl:setCOUNTRY_CODE=%s (recorded only)", cc);
+    }
+    return kIOReturnSuccess;
 }
 
 IOReturn itlmt7925Wifi::setGET_DEBUG_INFO(IO80211SkywalkInterface *, apple80211_debug_command *)

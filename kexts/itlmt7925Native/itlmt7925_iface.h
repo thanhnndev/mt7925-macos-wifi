@@ -81,6 +81,8 @@ public:
 
 private:
     void drainDatapath();
+    bool linkUp();
+    uint64_t osFeatureFlags = 0;            // setOS_FEATURE_FLAGS payload (qword at +0), kept as Apple's core does
     IOService *core = nullptr;
     IOTimerEventSource *dpTimer = nullptr;
     IOLock *rxLock = nullptr;

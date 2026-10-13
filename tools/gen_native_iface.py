@@ -19,7 +19,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HDRS = [os.path.join(ROOT, 'kexts/itlmt7925/io80211', h) for h in ('IO80211SkywalkInterface.h', 'IO80211InfraProtocol.h')]
 OUT = os.path.join(ROOT, 'kexts/itlmt7925Native/itlmt7925_iface_stubs.inc')
 PURE = re.compile(r'/\*\s*(\d+)\s*\*/\s*virtual\s+(\S+)\s+(\w+)\((.*?)\)\s*=\s*0;')
-CUSTOM = {'setMacAddress'}  # implemented with the native station identity, outside this generated file
+# implemented outside this generated file: setMacAddress with the native station identity; the rest with layouts taken from
+# Apple's AppleBCMWLANCore handlers (itlmt7925_iface.cpp, "IO80211InfraProtocol handlers with layouts taken from Apple's ...")
+CUSTOM = {'setMacAddress', 'getCHANNEL', 'getPOWERSAVE', 'getRATE', 'getOP_MODE', 'getRSSI', 'setUSB_HOST_NOTIFICATION',
+          'setOS_FEATURE_FLAGS', 'setINFRA_ENUMERATED'}
 
 
 def pure_slots():

@@ -194,12 +194,7 @@
     IOReturn setMWS_ACCESSORY_POWER_LIMIT_WIFI_ENH(apple80211_mws_accessory_power_limit* a1) override;   // slot 656
 #endif
 #ifdef ITL_IFACE_DEFS
-IOReturn itlmt7925WifiInterface::getCHANNEL(apple80211_channel_data* a1) { itlmtCall(ctl, 'S', 467); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::getPOWERSAVE(apple80211_powersave_data* a1) { itlmtCall(ctl, 'S', 468); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getTXPOWER(apple80211_txpower_data* a1) { itlmtCall(ctl, 'S', 469); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::getRATE(apple80211_rate_data* a1) { itlmtCall(ctl, 'S', 470); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::getOP_MODE(apple80211_opmode_data* a1) { itlmtCall(ctl, 'S', 471); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::getRSSI(apple80211_rssi_data* a1) { itlmtCall(ctl, 'S', 472); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getSUPPORTED_CHANNELS(apple80211_sup_channel_data* a1) { itlmtCall(ctl, 'S', 473); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getGUARD_INTERVAL(apple80211_guard_interval_data* a1) { itlmtCall(ctl, 'S', 474); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::getMCS(apple80211_mcs_data* a1) { itlmtCall(ctl, 'S', 475); return kIOReturnUnsupported; }
@@ -299,7 +294,6 @@ IOReturn itlmt7925WifiInterface::setPOWER_BUDGET(apple80211_power_budget_t* a1) 
 IOReturn itlmt7925WifiInterface::setOFFLOAD_TCPKA_ENABLE(apple80211_offload_tcpka_enable_t* a1) { itlmtCall(ctl, 'S', 569); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setLQM_CONFIG(apple80211_lqm_config_t* a1) { itlmtCall(ctl, 'S', 570); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setDYNAMIC_RSSI_WINDOW_CONFIG(apple80211_dynamic_rssi_window_config* a1) { itlmtCall(ctl, 'S', 571); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::setUSB_HOST_NOTIFICATION(apple80211_usb_host_notification_data* a1) { itlmtCall(ctl, 'S', 572); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setHP2P_CTRL(apple80211_hp2p_ctrl* a1) { itlmtCall(ctl, 'S', 573); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setBSS_BLACKLIST(bss_blacklist* a1) { itlmtCall(ctl, 'S', 574); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setSET_PROPERTY(apple80211_set_property_unserialized_data* a1) { itlmtCall(ctl, 'S', 575); return kIOReturnUnsupported; }
@@ -333,7 +327,6 @@ IOReturn itlmt7925WifiInterface::setWIFI_BT_5G_POLICY(apple80211_wifi_bt_5g_poli
 IOReturn itlmt7925WifiInterface::setWCL_ULOFDMA_STATE(apple80211_wcl_ulofdma_state* a1) { itlmtCall(ctl, 'S', 603); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setWCL_ACTION_FRAME(apple80211_wcl_action_frame* a1) { itlmtCall(ctl, 'S', 604); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setGAS_ABORT(void* a1) { itlmtCall(ctl, 'S', 605); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::setOS_FEATURE_FLAGS(apple80211_feature_flags* a1) { itlmtCall(ctl, 'S', 606); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setDHCP_RENEWAL_DATA(apple80211_dhcp_renewal_data* a1) { itlmtCall(ctl, 'S', 607); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setBATTERY_POWERSAVE_CONFIG(apple80211_battery_ps_config* a1) { itlmtCall(ctl, 'S', 608); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setMIMO_CONFIG(apple80211_mimo_config* a1) { itlmtCall(ctl, 'S', 609); return kIOReturnUnsupported; }
@@ -359,7 +352,6 @@ IOReturn itlmt7925WifiInterface::setWCL_ASSOCIATED_SLEEP(apple80211_associated_s
 IOReturn itlmt7925WifiInterface::setCONGESTION_CTRL_IND(apple80211_congestion_control_indication* a1) { itlmtCall(ctl, 'S', 629); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setSTAND_ALONE_MODE_STATE(apple80211_standalone_state* a1) { itlmtCall(ctl, 'S', 630); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setIPV6_PARAMS(apple80211_ipv6_params* a1) { itlmtCall(ctl, 'S', 631); return kIOReturnUnsupported; }
-IOReturn itlmt7925WifiInterface::setINFRA_ENUMERATED(apple80211_infra_enumerated* a1) { itlmtCall(ctl, 'S', 632); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setLMTPC_CONFIG(apple80211_lmtpc_config* a1) { itlmtCall(ctl, 'S', 633); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setTRAFFIC_ENG_PARAMS(apple80211_traffic_eng_params* a1) { itlmtCall(ctl, 'S', 634); return kIOReturnUnsupported; }
 IOReturn itlmt7925WifiInterface::setLE_SCAN_PARAM(apple80211_le_scan_params* a1) { itlmtCall(ctl, 'S', 635); return kIOReturnUnsupported; }

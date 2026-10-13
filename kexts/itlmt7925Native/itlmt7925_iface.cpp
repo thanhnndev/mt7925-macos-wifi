@@ -69,8 +69,16 @@ void itlmtTrace(IORegistryEntry *e, const char *fmt, ...)
     if (buf[0]) strlcat(buf, "; ", sizeof(buf));
     bool full = strlcat(buf, add, 1500) >= 1500;
     if (full) {
-        // Preserve recent diagnostic entries after the startup prefix fills up.
-        e->setProperty("itlmt_native_trace_tail", add);
+        // The startup prefix is full: keep going in a second append-only property (latest entry stays in itlmt_native_last).
+        char tail[1536];
+        tail[0] = 0;
+        OSObject *ts = e->copyProperty("itlmt_native_trace_tail");
+        if (OSString *old = OSDynamicCast(OSString, ts))
+            strlcpy(tail, old->getCStringNoCopy(), sizeof(tail));
+        if (ts) ts->release();
+        if (tail[0]) strlcat(tail, "; ", sizeof(tail));
+        if (strlcat(tail, add, 1500) < 1500)
+            e->setProperty("itlmt_native_trace_tail", tail);
     }
     if (!full) e->setProperty("itlmt_native_trace", buf);
     uint32_t nvtrace = 0;
@@ -785,6 +793,96 @@ void itlmt7925WifiInterface::drainDatapath()
         setProperty("itlmt_tx_checksum_failed", (uint64_t)txChecksumFailures, 64);
     }
     dpTimer->setTimeoutMS(10);
+}
+
+// ---- IO80211InfraProtocol handlers with layouts taken from Apple's AppleBCMWLANCore (24H32) ---------------------------------
+//
+// Apple's handlers answer from firmware and BSS-manager state; this driver has neither, so each one reports the idle, not-
+// associated answer Apple's own code gives for that state and nothing else. The link state is the core driver's (radioUp).
+// Error codes: 0xe0822403 is what getRSSI/getRATE return while not associated (0xffffff80015f2238, 0xffffff80015f23de);
+// 0xe0822801 is the value getCHANNEL returns when no current channel can be read (0xffffff80015f159c).
+namespace {
+const IOReturn kNotAssociated = (IOReturn)0xe0822403;
+const IOReturn kNoChannel = (IOReturn)0xe0822801;
+template <typename T>
+inline void store(void *base, size_t off, T v)
+{
+    memcpy((uint8_t *)base + off, &v, sizeof(v));
+}
+}
+
+bool itlmt7925WifiInterface::linkUp()
+{
+    if (!rxLock) return false;
+    IOLockLock(rxLock);
+    bool up = radioUp;
+    IOLockUnlock(rxLock);
+    return up;
+}
+
+IOReturn itlmt7925WifiInterface::getCHANNEL(apple80211_channel_data *d)
+{
+    itlmtCall(ctl, 'S', 467);
+    if (!d) return kIOReturnBadArgument;
+    return linkUp() ? kIOReturnUnsupported : kNoChannel;
+}
+
+// 0xffffff80015f2550: [data+4] = stored power-save mode. Power save is never configured here, so 0.
+IOReturn itlmt7925WifiInterface::getPOWERSAVE(apple80211_powersave_data *d)
+{
+    itlmtCall(ctl, 'S', 468);
+    if (!d) return kIOReturnBadArgument;
+    store<uint32_t>(d, 4, 0);
+    return kIOReturnSuccess;
+}
+
+IOReturn itlmt7925WifiInterface::getRATE(apple80211_rate_data *d)
+{
+    itlmtCall(ctl, 'S', 470);
+    if (!d) return kIOReturnBadArgument;
+    return linkUp() ? kIOReturnUnsupported : kNotAssociated;
+}
+
+// 0xffffff80015f2088: qword at +0 = 1 (version 1, mode word 0), then +4 |= mode bits of the BSS manager when associated.
+// No mode bit is set while not associated and no virtual interface exists.
+IOReturn itlmt7925WifiInterface::getOP_MODE(apple80211_opmode_data *d)
+{
+    itlmtCall(ctl, 'S', 471);
+    if (!d) return (IOReturn)0x16;
+    store<uint32_t>(d, 0, 1);
+    store<uint32_t>(d, 4, 0);
+    return linkUp() ? kIOReturnUnsupported : kIOReturnSuccess;
+}
+
+IOReturn itlmt7925WifiInterface::getRSSI(apple80211_rssi_data *d)
+{
+    itlmtCall(ctl, 'S', 472);
+    if (!d) return kIOReturnBadArgument;
+    return linkUp() ? kIOReturnUnsupported : kNotAssociated;
+}
+
+// Apple's handler (0xffffff8001610836) forwards the notification to firmware iovars (asym_mit_ext_usb[_chg]) and returns 0 for
+// chips that do not use them. The MT7925 here is on PCIe; there is nothing to forward, so the notification is accepted.
+IOReturn itlmt7925WifiInterface::setUSB_HOST_NOTIFICATION(apple80211_usb_host_notification_data *d)
+{
+    itlmtCall(ctl, 'S', 572);
+    return d ? kIOReturnSuccess : kIOReturnBadArgument;
+}
+
+// 0xffffff80016431c8: the qword at data+0 is stored in the core context (feature bits that gate firmware setup); returns 0.
+IOReturn itlmt7925WifiInterface::setOS_FEATURE_FLAGS(apple80211_feature_flags *d)
+{
+    itlmtCall(ctl, 'S', 606);
+    if (!d) return kIOReturnBadArgument;
+    memcpy(&osFeatureFlags, d, sizeof(osFeatureFlags));
+    return kIOReturnSuccess;
+}
+
+// 0xffffff800164404c: non-null argument -> 0, null -> 0xe00002bc (kIOReturnError); nothing else is done.
+IOReturn itlmt7925WifiInterface::setINFRA_ENUMERATED(apple80211_infra_enumerated *d)
+{
+    itlmtCall(ctl, 'S', 632);
+    return d ? kIOReturnSuccess : kIOReturnError;
 }
 
 #define ITL_IFACE_DEFS
