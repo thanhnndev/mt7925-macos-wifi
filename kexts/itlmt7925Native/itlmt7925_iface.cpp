@@ -282,12 +282,39 @@ IOSkywalkPacketBufferPool *itlmt7925WifiInterface::getRxPacketPool()
 
 IOReturn itlmt7925WifiInterface::enableDatapath()
 {
+    itlmtTrace(ctl, "if:enableDatapath unsupported");
     return kIOReturnUnsupported;    // no radio in stage 2
 }
 
 IOReturn itlmt7925WifiInterface::disableDatapath()
 {
+    itlmtTrace(ctl, "if:disableDatapath unsupported");
     return kIOReturnUnsupported;
+}
+
+IOReturn itlmt7925WifiInterface::enable(uint32_t options)
+{
+    itlmtTrace(ctl, "if:enable begin options=%x", options);
+    IOReturn result = IO80211InfraProtocol::enable(options);
+    itlmtTrace(ctl, "if:enable result=%x", result);
+    return result;
+}
+
+IOReturn itlmt7925WifiInterface::disable(uint32_t options)
+{
+    itlmtTrace(ctl, "if:disable begin options=%x", options);
+    IOReturn result = IO80211InfraProtocol::disable(options);
+    itlmtTrace(ctl, "if:disable result=%x", result);
+    return result;
+}
+
+IOReturn itlmt7925WifiInterface::processBSDCommand(__ifnet *netif, uint32_t command, void *data)
+{
+    IOReturn result = IO80211InfraProtocol::processBSDCommand(netif, command, data);
+    // Record only media queries and interface flags; never dump ioctl payloads.
+    if (command == 0xc02c6938 || command == 0xc0286938 || command == 0x80206910)
+        itlmtTrace(ctl, "if:bsd cmd=%x result=%x", command, result);
+    return result;
 }
 
 uint8_t itlmt7925WifiInterface::getNumTxQueues()

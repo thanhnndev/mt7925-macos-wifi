@@ -32,6 +32,9 @@ public:
     bool init() override;
     void free() override;
     void stop(IOService *provider) override;
+    IOReturn enable(uint32_t options) override;
+    IOReturn disable(uint32_t options) override;
+    IOReturn processBSDCommand(__ifnet *netif, uint32_t command, void *data) override;
 
     // Accessors the Family calls on its interface (IO80211SkywalkInterface slots 418-439; AppleBCMWLANSkywalkInterface overrides them)
     CCLogStream *getLogger() const override;
