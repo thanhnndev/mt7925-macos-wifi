@@ -68,24 +68,20 @@ apply() {   # $1 = tag, then itlctl arguments, last word of the tag line = expec
 
 say "itl-ab start $(date) if=$IF gateway=$GW"
 say "m3-log (power / efuse): $(prop m3-log 2400 | grep -oE 'sar:[^;]*;|clc[^;]*;|txpower[^;]*;|efuse[^;]*;|power tables[^;]*;' | tr '\n' ' ')"
-measure "A  L6 HE 160 MHz, no power tables (boot state)"
-apply "B  L6 HE 80 MHz (no160), no tables"            6 itl_no160=1 itl_lvl=6
-apply "C  L5 VHT 160 MHz (no HE), no tables"          5 itl_no160=0 itl_lvl=5
-apply "D  L4 VHT 80 MHz + A-MSDU RX, no tables"       4 itl_lvl=4
-apply "E  L3 VHT 80 MHz, no A-MSDU, no tables"        3 itl_lvl=3
-apply "F  L1 HT/VHT rates, no Block Ack, no tables"   1 itl_lvl=1
-apply "G  L6 HE 160 MHz again, still no tables"       6 itl_no160=0 itl_lvl=6
+measure "A  L6 HE 160 MHz, A-MSDU off (boot state), no tables"
+apply "B  L6 HE 80 MHz, A-MSDU off"                    6 itl_no160=1 itl_lvl=6
+apply "C  L5 VHT 160 MHz (no HE), A-MSDU off"          5 itl_no160=0 itl_lvl=5
+apply "D  L4 VHT 80 MHz, A-MSDU off"                   4 itl_no160=1 itl_lvl=4
+apply "E  L3 VHT 80 MHz, TX pool, A-MSDU off"          3 itl_lvl=3
+apply "F  L6 HE 160 MHz, A-MSDU ON (diagnosis)"        6 itl_no160=0 itl_amsdu=1 itl_lvl=6
+apply "G  L4 VHT 80 MHz, A-MSDU ON"                    4 itl_no160=1 itl_lvl=4
+apply "H  L6 HE 160 MHz, A-MSDU off again"             6 itl_no160=0 itl_amsdu=0 itl_lvl=6
 say ""
 say "--- apply: itl_pwr=40 (CLC + SKU tables, 20 dBm ceiling), same link"
 "$CTL" itl_pwr=40 2>&1 | tee -a "$OUT" >/dev/null
 sleep 6
-measure "H  L6 HE 160 MHz + power tables (20 dBm ceiling)"
-apply "I  L6 HE 80 MHz + power tables"                6 itl_no160=1 itl_lvl=6
-say ""
-say "--- apply: itl_pwr=127 (SAR limit only), same link"
-"$CTL" itl_pwr=127 2>&1 | tee -a "$OUT" >/dev/null
-sleep 6
-measure "J  L6 HE 80 MHz + tables, SAR ceiling (29.5 dBm)"
-apply "K  L6 HE 160 MHz, reorder 10 ms"               6 itl_no160=0 itl_reo=10 itl_lvl=6
+measure "I  L6 HE 160 MHz + power tables (20 dBm ceiling), A-MSDU off"
+apply "J  L6 HE 160 MHz, reorder 10 ms"                6 itl_reo=10 itl_lvl=6
+apply "K  L6 HE 160 MHz, reorder 100 ms"               6 itl_reo=100 itl_lvl=6
 say ""
 say "itl-ab done $(date)"

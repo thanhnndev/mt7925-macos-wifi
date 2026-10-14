@@ -197,7 +197,7 @@ uint8_t itlmt7925::fastSig(uint8_t level)
     bool g2 = tgtCh <= 14;
     uint8_t bw, center;
     itl_caps_channel(&apCaps, tgtCh, level >= 5 && !g2 && !no160, &bw, &center);
-    return (level >= 4 ? 1 : 0) | ((level >= 6 && apCaps.he) ? 2 : 0) | (bw == 3 ? 4 : 0);
+    return (level >= 4 && !noAmsdu ? 1 : 0) | ((level >= 6 && apCaps.he) ? 2 : 0) | (bw == 3 ? 4 : 0);
 }
 
 // HT/VHT/HE plan (boot-arg itlmt_fast=<level>): what the AP offers, the channel width to run at and the rate to report to macOS.
@@ -218,7 +218,7 @@ void itlmt7925::m3FastPlan()
     }
     itl_caps_channel(&apCaps, tgtCh, lvl >= 5 && !g2 && !no160, &fastBw, &fastCenter);
     fastAllow160 = fastBw == 3;
-    fastAmsdu = lvl >= 4;
+    fastAmsdu = lvl >= 4 && !noAmsdu;
     fastHe = lvl >= 6 && apCaps.he;
     fastNss = itl_caps_nss(&apCaps);
     fastRate = itl_caps_max_rate(&apCaps, fastBw, fastHe);
@@ -1090,7 +1090,7 @@ void itlmt7925::rxStore(const uint8_t *eb, uint32_t n, bool reorder, uint8_t tid
     if (a.active && (a.tid != tid || a.sn != sn)) amsduFlush();
     if (!a.active) { a.active = true; a.tid = tid; a.sn = sn; a.used = 0; a.t = nowMs(); }
     uint32_t u = itl_bundle_add(a.buf, sizeof(a.buf), a.used, eb, n);
-    if (u == a.used) stRxDrop++; else a.used = u;
+    if (u == a.used) { stRxDrop++; stBundleOvf++; } else a.used = u;
     if (last) amsduFlush();
 }
 
@@ -1173,6 +1173,8 @@ bool itlmt7925::m3RxData(const uint8_t *p, uint32_t len)
             uint32_t bo = off + hl;
             uint32_t n = bo < len ? m3RxAmsdu(p + bo, len - bo, ai, reorder, tid, sn) : 0;
             stAmsduSub += n;
+            stAmsduAi[ai & 3]++;
+            stAmsduN[n > 4 ? 4 : n]++;
             if (!n) {
                 stAmsduBad++;
                 if (amsduBadLogged < 3) {

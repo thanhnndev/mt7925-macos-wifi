@@ -837,3 +837,35 @@ checksums). Candidates left: power tables (uplink power / control responses), th
 * **The first matrix run measured the phone tether.** The default route was the tether (en1): the "gateway" was the phone, the
   11.6 MB/s download and the unchanged counters were not Wi-Fi at all. `itl-ab.sh` now binds every ping / download to the
   Wi-Fi interface (`ping -b`, `curl --interface`), takes the gateway from that interface and stops if it has no router.
+
+### Round 26 result: A-MSDU in the Block Ack agreement is what collapses the throughput (2026-10-14)
+
+Matrix run inside one boot (core with the recovery fix, boot-args `itlmt_fast=6 itlmt_nopwr=1 itlmt_stat=1`, WARP off, all
+traffic bound to the Wi-Fi interface, 10 s Apple CDN download; same AP, same radio):
+
+| Config | Download | GW 1400 B loss | WAN 1400 B loss | WAN 56 B loss |
+|---|---|---|---|---|
+| A  L6 HE 160 MHz | 23 KB/s | 0 % | 70 % | 0 % |
+| B  L6 HE 80 MHz | 59 KB/s | 0 % | 69 % | 3 % |
+| C  L5 VHT 160 MHz | 66 KB/s | 0 % | 69 % | 1 % |
+| D  L4 VHT 80 MHz + A-MSDU RX | 39 KB/s | 2 % | 71 % | 0 % |
+| **E  L3 VHT 80 MHz, no A-MSDU** | **5 587 KB/s** | 5 % | 70 % | 1 % |
+| F  L1 no Block Ack | 333 KB/s | 37 % | 82 % | 6 % |
+| G  L6 160 MHz again | 170 KB/s | 10 % | 70 % | 2 % |
+| H  L6 160 MHz + CLC/SKU tables 20 dBm | 46 KB/s | 1 % | 70 % | 2 % |
+| I  L6 80 MHz + tables | 49 KB/s | 0 % | 69 % | 3 % |
+| J  L6 80 MHz + tables, SAR ceiling | 48 KB/s | 100 % | 72 % | 5 % |
+| K  L6 160 MHz, reorder 10 ms | 61 KB/s | 1 % | 71 % | 0 % |
+
+* Power tables (H, I, J), 160 vs 80 MHz (A vs B), HE vs VHT (C) and the reorder timeout (K) change nothing. Only the step
+  from level 3 to level 4 (the Block Ack agreement now accepts A-MSDU) costs a factor of ~100; level 3 has the whole
+  Block Ack / TX-pool path and does 5.6 MB/s.
+* The 70 % loss of 1400 B pings to 1.1.1.1 is the same at level 3, so it is not what stalls TCP (it is outside this driver or
+  its cause is unknown; chưa xác định).
+* Why A-MSDU hurts is not known yet: the hardware splits A-MSDUs into one packet per subframe, `stat-log` `am=` says
+  packets == subframes, `drop=0`. Round 26d adds `rx-log` `ai=` (RXD4 payload format seen), `subs=` (subframes per packet,
+  0..4+), `ovf=` (bundle full) and `bigdrop=` for the diagnosis.
+
+**Round 26d change.** A-MSDU is off by default: `noAmsdu = true`, so levels 4..6 keep HE and 160 MHz but the agreement does not
+accept A-MSDU. Boot-arg `itlmt_amsdu=1` or run time `itl_amsdu=1` (with the next reconnect) turn it back on. `tools/itl-ab.sh`
+matrix: A-MSDU off at L6/160, L6/80, L5, L4, L3, then A-MSDU on at L6 and L4 for comparison, tables, reorder 10 / 100 ms.

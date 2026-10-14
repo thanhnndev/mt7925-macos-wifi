@@ -305,7 +305,12 @@ private:
     // Boot-arg itlmt_nopwr=1: no CLC / SAR power tables at join (the firmware's own defaults, as the benchmarks before a45e8c1
     // ran); the tables can then be sent at run time (ctlPwr) for a before/after comparison in one boot.
     bool noPwr = false;
-    uint8_t pwrCeil = 40;                    // per-rate ceiling of the SKU tables, 0.5 dBm (m3TxPower)
+    // A-MSDU receive stays off by default (levels 4..6 run without it): the round 26 matrix gave 5.6 MB/s at level 3 and 25-60 KB/s
+    // at every level with A-MSDU in the Block Ack agreement, same AP / radio / tables. Boot-arg itlmt_amsdu=1 or itl_amsdu=1
+    // (run time, with the next reconnect) turn it back on for the diagnosis.
+    bool noAmsdu = true;
+    uint32_t stAmsduAi[4] = {}, stAmsduN[5] = {}, stBundleOvf = 0;   // RXD4 payload format seen, subframes per packet (0..3, 4+), bundle full
+    uint8_t pwrCeil = 40;                   // per-rate ceiling of the SKU tables, 0.5 dBm (m3TxPower)
     uint32_t statSecs = 0;                   // boot-arg itlmt_stat=<s>: stat-log period (default 5 s for 5 min, then 60 s)
     // Run-time control (IORegistryEntrySetCFProperties, administrator only; tools/itlctl.c). Taken by the link loop, so an A/B
     // does not need a reboot: itl_lvl = reconnect at that level, itl_no160, itl_reo = reorder timeout ms, itl_pwr = send the

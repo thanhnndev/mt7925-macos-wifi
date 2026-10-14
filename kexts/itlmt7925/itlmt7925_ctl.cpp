@@ -39,6 +39,10 @@ IOReturn itlmt7925::setProperties(OSObject *props)
         no160 = v != 0;
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "no160=%u ", v != 0);
     }
+    if (ctlNum(d, "itl_amsdu", &v)) {
+        noAmsdu = v == 0;
+        snprintf(log + strlen(log), sizeof(log) - strlen(log), "amsdu=%u ", v != 0);
+    }
     if (ctlNum(d, "itl_reo", &v) && v >= 5 && v <= 500) {
         reoMs = v;
         snprintf(log + strlen(log), sizeof(log) - strlen(log), "reo=%u ", v);
@@ -103,13 +107,16 @@ void itlmt7925::tsSample(uint32_t now)
     ts[n] = 0;
     setProperty("ts-log", ts);                               // eth,ring,tx,fwretry,noslot,old,timeout per second, oldest first
 
-    char s[400];
+    char s[640];
     snprintf(s, sizeof(s),
-             "ring=%u/%u/%u/%u/%u/%u parsed=%u/%u/%u/%u/%u/%u deliv=%u/%u/%u/%u/%u/%u other=%u/%u/%u/%u/%u/%u echo>=1000B rx=%u/%u tx=%u lvl=%u no160=%u pwr=%u",
+             "ring=%u/%u/%u/%u/%u/%u parsed=%u/%u/%u/%u/%u/%u deliv=%u/%u/%u/%u/%u/%u other=%u/%u/%u/%u/%u/%u echo>=1000B rx=%u/%u tx=%u lvl=%u no160=%u pwr=%u"
+             " noam=%u ai=%u/%u/%u/%u subs=%u/%u/%u/%u/%u ovf=%u bigdrop=%u",
              szRing[0], szRing[1], szRing[2], szRing[3], szRing[4], szRing[5],
              szParsed[0], szParsed[1], szParsed[2], szParsed[3], szParsed[4], szParsed[5],
              szDeliv[0], szDeliv[1], szDeliv[2], szDeliv[3], szDeliv[4], szDeliv[5],
              szOther[0], szOther[1], szOther[2], szOther[3], szOther[4], szOther[5],
-             icmpRepParsed, icmpRepDeliv, icmpReqTx, lvl, no160 ? 1 : 0, clcCc[0] ? pwrCeil : 0);
+             icmpRepParsed, icmpRepDeliv, icmpReqTx, lvl, no160 ? 1 : 0, clcCc[0] ? pwrCeil : 0,
+             noAmsdu ? 1 : 0, stAmsduAi[0], stAmsduAi[1], stAmsduAi[2], stAmsduAi[3],
+             stAmsduN[0], stAmsduN[1], stAmsduN[2], stAmsduN[3], stAmsduN[4], stBundleOvf, stRxBigDrop);
     setProperty("rx-log", s);
 }
