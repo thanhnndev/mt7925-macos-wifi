@@ -1,0 +1,80 @@
+#!/bin/bash
+# itl-ab.sh - A/B matrix of the itlmt7925 data path inside ONE boot (run as root, after the Wi-Fi link is up and WARP/VPN is off).
+#
+#   cc -o /tmp/itlctl tools/itlctl.c -framework IOKit -framework CoreFoundation
+#   sudo /bin/bash tools/itl-ab.sh /tmp/itlctl /tmp/itl-ab.txt
+#
+# Every configuration is applied with itlctl (reconnect at a level, 160 MHz on/off, power tables, reorder timeout), then measured:
+# 1400 B and 56 B pings to the gateway and to 1.1.1.1, a 10 s download, and the driver's own counters before and after.
+# Boot with itlmt_nopwr=1 itlmt_stat=1 (no CLC/SAR tables at join, stat-log every second) so that the tables can be compared too.
+CTL=${1:?itlctl path}
+OUT=${2:?output file}
+GW=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')
+GW=${GW:-10.0.0.1}
+: > "$OUT"
+
+prop() { ioreg -l -w0 | grep -E "\"$1\" = " | sed -e 's/^[ |]*//' | head -1 | cut -c1-${2:-1500}; }
+say() { echo "$@" | tee -a "$OUT" >/dev/null; }
+
+wait_link() {   # $1 = level expected in rx-log; the new link is the one whose stat-log "up=" counter restarted
+  local i up
+  sleep 3
+  for i in $(seq 1 60); do
+    up=$(prop stat-log | sed -n 's/.*up=\([0-9]*\)s.*/\1/p')
+    if [ -n "$up" ] && [ "$up" -lt 40 ] && prop rx-log 1500 | grep -q " lvl=$1 " && ping -c1 -t1 "$GW" >/dev/null 2>&1; then
+      sleep 4
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+measure() {   # $1 = tag
+  say ""
+  say "=================== $1  ($(date +%H:%M:%S))"
+  say "before: $(prop stat-log)"
+  say "before: $(prop rx-log)"
+  say "ping gw   1400B: $(ping -c 100 -i 0.05 -s 1400 "$GW" 2>&1 | grep -E 'packet loss|round-trip' | tr '\n' ' ')"
+  say "ping wan  1400B: $(ping -c 100 -i 0.05 -s 1400 1.1.1.1 2>&1 | grep -E 'packet loss|round-trip' | tr '\n' ' ')"
+  say "ping wan    56B: $(ping -c 100 -i 0.05 1.1.1.1 2>&1 | grep -E 'packet loss' | tr '\n' ' ')"
+  say "download 10 s : $(curl -4 -s -o /dev/null -m 10 -w 'ttfb=%{time_starttransfer}s bytes=%{size_download} speed=%{speed_download} B/s' 'https://mensura.cdn-apple.com/api/v1/gm/large' 2>&1)"
+  say "after : $(prop stat-log)"
+  say "after : $(prop rx-log)"
+  say "ts-log (eth,ring,tx,fwretry,noslot,old,timeout per s, last 14): $(prop ts-log 4000 | sed -e 's/.*= "//' -e 's/"$//' | tr ';' '\n' | tail -14 | tr '\n' ' ')"
+  say "events: $(prop wifi-events 600)"
+}
+
+apply() {   # $1 = tag, then itlctl arguments, last word of the tag line = expected level
+  local tag=$1 lvl=$2
+  shift 2
+  say ""
+  say "--- apply: $* ($tag)"
+  "$CTL" "$@" 2>&1 | tee -a "$OUT" >/dev/null
+  if ! wait_link "$lvl"; then say "!!! link did not come back at level $lvl in 120 s"; fi
+  measure "$tag"
+}
+
+say "itl-ab start $(date) gateway=$GW"
+say "m3-log (power / efuse): $(prop m3-log 2400 | grep -oE 'sar:[^;]*;|clc[^;]*;|txpower[^;]*;|efuse[^;]*;|power tables[^;]*;' | tr '\n' ' ')"
+measure "A  L6 HE 160 MHz, no power tables (boot state)"
+apply "B  L6 HE 80 MHz (no160), no tables"            6 itl_no160=1 itl_lvl=6
+apply "C  L5 VHT 160 MHz (no HE), no tables"          5 itl_no160=0 itl_lvl=5
+apply "D  L4 VHT 80 MHz + A-MSDU RX, no tables"       4 itl_lvl=4
+apply "E  L3 VHT 80 MHz, no A-MSDU, no tables"        3 itl_lvl=3
+apply "F  L1 HT/VHT rates, no Block Ack, no tables"   1 itl_lvl=1
+apply "G  L6 HE 160 MHz again, still no tables"       6 itl_no160=0 itl_lvl=6
+say ""
+say "--- apply: itl_pwr=40 (CLC + SKU tables, 20 dBm ceiling), same link"
+"$CTL" itl_pwr=40 2>&1 | tee -a "$OUT" >/dev/null
+sleep 6
+measure "H  L6 HE 160 MHz + power tables (20 dBm ceiling)"
+apply "I  L6 HE 80 MHz + power tables"                6 itl_no160=1 itl_lvl=6
+say ""
+say "--- apply: itl_pwr=127 (SAR limit only), same link"
+"$CTL" itl_pwr=127 2>&1 | tee -a "$OUT" >/dev/null
+sleep 6
+measure "J  L6 HE 80 MHz + tables, SAR ceiling (29.5 dBm)"
+apply "K  L6 HE 160 MHz, reorder 10 ms"               6 itl_no160=0 itl_reo=10 itl_lvl=6
+say ""
+say "itl-ab done $(date)"

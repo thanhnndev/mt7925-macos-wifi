@@ -220,6 +220,7 @@ void itlmt7925::rxParseFrame(const uint8_t *p, uint32_t len)
         return;
     }
     rxOther++;
+    if (m3dataOn) szOther[szClass(len > 120 ? len - 120 : 0)]++;
 }
 
 void itlmt7925::rxFrameDump(const uint8_t *p, uint32_t len)

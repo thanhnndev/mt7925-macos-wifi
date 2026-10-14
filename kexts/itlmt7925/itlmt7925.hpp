@@ -147,6 +147,7 @@ private:
     void m3Capture(const uint8_t *frame, uint32_t len, const char *ssid, uint8_t ch);
     int  m3Cmd(uint8_t cid, const void *payload, size_t plen, const char *name);
     int  m3HwPrep();
+    void ctlPoll();                          // link loop: take run-time control requests (setProperties)
     int  m3Bss(bool enable);
     int  m3Clc(const char *cc, uint8_t env);   // CLC power tables from the RAM firmware for country cc
     int  clcSend(const uint8_t *clc, const char *cc, uint8_t env, uint8_t idx);
@@ -301,6 +302,31 @@ private:
     // Boot-arg itlmt_no160=1: never run a 160 MHz channel (level 5/6 stay 80 MHz; HE keeps working). A/B for 160 MHz links where
     // the AP re-sends ~9 % of the frames already received (its Block Acks from us do not arrive) and holes never fill.
     bool no160 = false;
+    // Boot-arg itlmt_nopwr=1: no CLC / SAR power tables at join (the firmware's own defaults, as the benchmarks before a45e8c1
+    // ran); the tables can then be sent at run time (ctlPwr) for a before/after comparison in one boot.
+    bool noPwr = false;
+    uint8_t pwrCeil = 40;                    // per-rate ceiling of the SKU tables, 0.5 dBm (m3TxPower)
+    uint32_t statSecs = 0;                   // boot-arg itlmt_stat=<s>: stat-log period (default 5 s for 5 min, then 60 s)
+    // Run-time control (IORegistryEntrySetCFProperties, administrator only; tools/itlctl.c). Taken by the link loop, so an A/B
+    // does not need a reboot: itl_lvl = reconnect at that level, itl_no160, itl_reo = reorder timeout ms, itl_pwr = send the
+    // power tables now with that per-rate ceiling (0.5 dBm).
+    volatile uint32_t ctlLvl = 0, ctlPwr = 0;
+    uint8_t lvlForce = 0;                    // level the next reconnect uses (set from ctlLvl), 0 = the ladder's own choice
+    int  m3PowerSetup();                     // efuse hw type + CLC + SKU tables; best effort, 0 when the link may go on
+    IOReturn setProperties(OSObject *props) override;
+    // Where do the large frames go: classes of the Ethernet frame length (<128, <512, <1024, <1280, <1400, >=1400) at the RX ring,
+    // after A-MSDU / header parsing, and when handed to the stack; big ICMP echoes (>= 1000 B) at the same stages and on TX.
+    uint32_t szRing[6] = {}, szParsed[6] = {}, szDeliv[6] = {}, szOther[6] = {};
+    uint32_t icmpRepParsed = 0, icmpRepDeliv = 0, icmpReqTx = 0;
+    static uint8_t szClass(uint32_t n) { return n < 128 ? 0 : n < 512 ? 1 : n < 1024 ? 2 : n < 1280 ? 3 : n < 1400 ? 4 : 5; }
+    static bool isBigEcho(const uint8_t *e, uint32_t n, uint8_t type) {
+        return n >= 1000 && n >= 34 && e[12] == 0x08 && e[13] == 0x00 && e[23] == 1 && e[14 + ((e[14] & 15) * 4)] == type;
+    }
+    // one sample per second: [eth delivered, ring frames, tx, fw retries, tx no-slot stalls, reorder old, reorder timeouts]
+    static const uint32_t kTsN = 90;
+    uint32_t tsRing[kTsN][7] = {};
+    uint32_t tsHead = 0, tsLastMs = 0, tsPrev[7] = {};
+    void tsSample(uint32_t now);
     char rssiProbe[700] = {0};               // RXD layout samples of the first beacons with RX vector, for the signal decoder
     uint8_t rssiProbeN = 0;
     // A-MSDU receive (level 4): the hardware splits an A-MSDU into one RX packet per subframe (first / middle / last in RXD4),

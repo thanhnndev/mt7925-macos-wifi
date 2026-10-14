@@ -298,27 +298,30 @@ int itlmt7925::m3HwPrep()
     for (unsigned i = 0; i < n5; i++, w += 8) put16(w, ch5[i]);
     int rc = m3Cmd(UNI_SET_DOMAIN_INFO, dom, (size_t)(w - dom), "set_domain");
     if (rc) return rc;
-    if (!clcCc[0]) {
-        sarInit();
-        uint8_t encap = 0;
-        rc = efuseRead(0xa71, &encap);
-        if (rc) {
-            // the power tables are an optimisation: the firmware ran without them before (they were added without a hardware
-            // run and the efuse query failed on every join of the first one), so a failure must not abort the connection
-            m3log("efuse hw type failed rc=%d, joining without power tables", rc);
-            clcCc[0] = 0;
-            return 0;
-        }
-        hwEncap = encap & 3;
-        rc = m3Clc("00", 1);                               // world, indoor; same domain as set_domain
-        if (!rc) rc = m3TxPower();
-        if (rc) {
-            clcCc[0] = 0;                                   // retry the complete setup on the next join
-            m3log("power tables failed rc=%d, joining without them", rc);
-            rc = 0;
-        }
-    }
+    if (!clcCc[0] && !noPwr) m3PowerSetup();
     return rc;
+}
+
+// Power tables: CLC (world, indoor) + the SKU limits. Best effort: the firmware ran without them before (they were added without
+// a hardware run and the efuse query failed on every join of the first one), so a failure must not abort the connection.
+int itlmt7925::m3PowerSetup()
+{
+    sarInit();
+    uint8_t encap = 0;
+    int rc = efuseRead(0xa71, &encap);
+    if (rc) {
+        m3log("efuse hw type failed rc=%d, joining without power tables", rc);
+        clcCc[0] = 0;
+        return 0;
+    }
+    hwEncap = encap & 3;
+    rc = m3Clc("00", 1);                                   // world, indoor; same domain as set_domain
+    if (!rc) rc = m3TxPower();
+    if (rc) {
+        clcCc[0] = 0;                                       // retry the complete setup on the next join
+        m3log("power tables failed rc=%d, joining without them", rc);
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -890,17 +893,23 @@ int itlmt7925::m3Run()
         int rc = m3Run1();
         if (!m3stepDown || lvl == 0) return rc;
         uint8_t next = lvl - 1;
-        // levels 4..6 add features only where the AP offers them: skip the ones that would repeat the configuration that just failed
-        while (next >= 4 && fastSig(next) == fastSig(lvl)) next--;
-        if (next == 2) next = 1;                             // RX Block Ack alone buys nothing without TX Block Ack: one attempt less
+        const bool forced = lvlForce != 0;                   // run-time control (itl_lvl): exactly the level asked for
+        if (forced) {
+            next = lvlForce;
+            lvlForce = 0;
+        } else {
+            // levels 4..6 add features only where the AP offers them: skip the ones that would repeat the configuration that just failed
+            while (next >= 4 && fastSig(next) == fastSig(lvl)) next--;
+            if (next == 2) next = 1;                         // RX Block Ack alone buys nothing without TX Block Ack: one attempt less
+        }
         baLog("level %u given up, connecting again at %u", lvl, next);
-        evLog("level %u -> %u%s", lvl, next, m3stepRadio ? " (radio; next connection starts high again)" : "");
+        evLog("level %u -> %u%s", lvl, next, forced ? " (asked for)" : m3stepRadio ? " (radio; next connection starts high again)" : "");
         m3Teardown();
         lvl = next;
         // A level the AP does not work with stays given up for this network. Failing transmissions are radio conditions
         // (distance, interference, a busy 160 MHz channel): run lower now, but let the next connection try the full level again,
         // instead of staying slow for the rest of the boot after one bad minute.
-        if (!m3stepRadio) {
+        if (!m3stepRadio || forced) {                        // (a level asked for at run time sticks: a re-join starts there too)
             lvlCap = next;
             capMs = nowMs() ? nowMs() : 1;
             capBand = tgtCh <= 14 ? 1 : 2;
@@ -1069,6 +1078,8 @@ void itlmt7925::amsduFlush()
 void itlmt7925::rxStore(const uint8_t *eb, uint32_t n, bool reorder, uint8_t tid, uint16_t sn, bool last)
 {
     AmsduAsm &a = amsduAsm;
+    szParsed[szClass(n)]++;
+    if (isBigEcho(eb, n, 0)) icmpRepParsed++;
     if (!reorder) {
         amsduFlush();
         ethDeliver(eb, n);
@@ -1127,6 +1138,7 @@ uint32_t itlmt7925::m3RxAmsdu(const uint8_t *b, uint32_t n, uint8_t ai, bool reo
 // The header sits after up to 32 + 4 x 16 + 96 bytes of RXD groups (mt7925_mac_fill_rx), so look for it from byte 32 on.
 bool itlmt7925::m3RxData(const uint8_t *p, uint32_t len)
 {
+    szRing[szClass(len > 120 ? len - 120 : 0)]++;            // the RXD groups, 802.11 header and LLC are ~120 bytes more than the Ethernet frame
     for (uint32_t off = 32; off + 24 <= len && off < 240; off++) {
         uint8_t fc0 = p[off], fc1 = p[off + 1];
         if ((fc0 & 0x0c) != 0x08 || (fc1 & 3) != 2) continue;               // data frame, From DS
@@ -1259,6 +1271,7 @@ int itlmt7925::ethTx(const uint8_t *e, uint32_t len)
     bool full = false;
     bool ok = m3TxData(e, be16p(e + 12), e + 14, len - 14, true, &full);
     if (full) return 1;
+    if (isBigEcho(e, len, 8)) icmpReqTx++;
     if (ok) stTx++; else stTxFail++;
     m3Note("tx", e, len);
     return ok ? 0 : -1;
@@ -1534,6 +1547,8 @@ void itlmt7925::m3Link()
             m3Teardown();
             return;
         }
+        if (ctlLvl || ctlPwr) ctlPoll();
+        tsSample(now);
         if (!silenceDone && tgtLastBcnMs && now - tgtLastBcnMs > 4000 && now - lastRxDataMs > 4000) {
             // No beacon for 4 s (the AP sends ten a second): snapshot, then take driver ownership again in case the firmware
             // went to sleep on its own, and snapshot once more to see whether that changed anything.
@@ -1595,7 +1610,7 @@ void itlmt7925::m3Link()
                 txfBad = 0;
             }
         }
-        if (up >= lastStat + (up < 300 ? 5 : 60)) {
+        if (up >= lastStat + (statSecs ? statSecs : (up < 300 ? 5 : 60))) {
             lastStat = up;
             uint32_t ri = 0, rd_ = 0, rb = 0, rdup = 0, rold = 0, rfl = 0, rto = 0, rlate = 0;
             for (int t = 0; t < 8; t++) {

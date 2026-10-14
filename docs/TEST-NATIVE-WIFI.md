@@ -775,3 +775,46 @@ reorder timeout turns every hole that is never filled into a 30 ms stall of the 
   native 2e9345b7...) and `build/config.plist.round25-pre`. Undo: copy the backups back, `occonfig.py ... args del itlmt_no160 itlmt_reo`.
 * **One reboot, read:** `stat-log` shows `bw=2`; `rty=` ratio; `old` / `timeout` shares of `reo=`; `curl` speed; then A/B by
   removing `itlmt_no160` (160 MHz back) and `itlmt_reo` (30 ms) one at a time only if 80 MHz is also slow.
+
+### Round 26: legacy comparison and the A/B matrix in one boot (2026-10-14)
+
+Round 25 was never booted: the evidence changed what to test, and one boot should answer all of it.
+
+**What the legacy driver did (same core, same radio engine, same 160 MHz HE AP, 2026-10-11, `HANDOFF.md` 10b/10)**: 4.3-8 MB/s
+down, 0.9-6 MB/s up, with the same "old ~8 %, TX retry 30 %" signature (`rty` 13269 of 44055). So that signature is **not** the
+cause of the collapse to 23-66 KB/s. Core changes after that benchmark, in order: `a45e8c1` (CLC + ACPI SAR power tables, RX
+rings 1536, cached frame DMA buffers, batched `inputPacket`), `94e9814` (power tables finally accepted: before it the efuse query
+failed on every join, so the tables were *never sent* in the legacy benchmark), then rounds 21-25 (RX duplicate drop,
+firmware MAC + locally administered bit, native bridge). Of those, the power tables are the only change that alters what the
+radio transmits.
+
+**New evidence (round 24 build, WARP off, 1319 s uptime, -40 dBm):**
+
+| Probe | Result |
+|---|---|
+| ping 1400 B to the gateway (the AP itself) | 0 % loss, 2-16 ms |
+| ping 1400 B to 1.1.1.1 | 41-70 % loss; 10 % at 1 s interval |
+| ping to 1.1.1.1 by size (56 / 500 / 1000 / 1400 B) | 2 / 4 / 14 / 40 % |
+| ping 1400 B to other LAN clients (.2 / .5 / .12 / .82) | 22 / 100 / 7 / 0 % (peer dependent) |
+| `netstat -s` ip / icmp / tcp | 0 bad checksums, 0 fragments, 0 TCP retransmits |
+| `stat-log` | am=718674/718674/0/0: every A-MSDU carries one subframe; txf fwretry 1.6 per frame (0.7 earlier) |
+
+Reading: the loss follows the *size* of frames forwarded by the AP (A-MSDU path, one subframe each) and not the gateway's own
+replies (plain MPDUs), and no corrupted frame ever reaches the stack (cached DMA coherence is excluded: it would show bad
+checksums). Candidates left: power tables (uplink power / control responses), the A-MSDU receive path, 160 MHz.
+
+**Round 26 build (core `8effa037...`, native `a9ec3650...`, installed, reboot pending):**
+
+* `itlmt_nopwr=1`: no CLC / SAR tables at join = the radio as in the legacy benchmark. `itlmt_stat=1`: `stat-log` every second.
+* Run-time control without a reboot (`itlmt7925_ctl.cpp`, `tools/itlctl.c`, administrator only, applied by the link loop):
+  `itl_lvl=1..6` reconnects at exactly that level (cap for the network untouched), `itl_no160`, `itl_reo=<ms>`,
+  `itl_pwr=<ceiling in 0.5 dBm>` sends the CLC + SKU tables on the live link.
+* New `rx-log` (size classes `<128 <512 <1024 <1280 <1400 >=1400` at the RX ring, after A-MSDU parsing, at delivery, parse
+  rejects; big ICMP echoes at each stage and on TX) and `ts-log` (per second: eth, ring, tx, fwretry, noslot, old, timeouts).
+  If a 1400 B echo reply is counted at `parsed` and not at `deliv` the loss is the reorder buffer; if it is not counted at the
+  ring the radio / firmware never handed it over.
+* `tools/itl-ab.sh` runs the matrix as root and writes one text file: A L6 160 MHz no tables (boot state), B L6 80 MHz,
+  C L5 VHT160, D L4 VHT80+A-MSDU, E L3 no A-MSDU, F L1 no Block Ack, G back to A, H tables sent live (20 dBm ceiling), I 80 MHz +
+  tables, J SAR ceiling, K reorder 10 ms. Each: gateway / WAN pings at 1400 B and 56 B, 10 s download, counters before / after.
+* Install: backups `build/esp-backup-{core,native}-round26-pre.kext`, `build/config.plist.round26-pre`; boot-args
+  `itlmt_no160` and `itlmt_reo` removed, `itlmt_nopwr=1 itlmt_stat=1` added. Tools in `build/itl-ab/` (survive the reboot).
