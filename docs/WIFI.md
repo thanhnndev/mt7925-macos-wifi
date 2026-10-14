@@ -8,7 +8,7 @@ interface (`itlmt7925Eth`), the same trick the itlwm project uses for Intel card
 > **Update 2026-10-12 (owner-confirmed):** the driver now reaches the **full link speed** (HE, 160 MHz) with the `itlmt_fast` ladder; the
 > throughput numbers and "slow" statements below (6 Mb/s, ~8 Mb/s, ~5 MB/s) are the history of getting there. The owner measured the
 > final speed at the maximum and will supply the numbers (`iperf3` both directions, band, channel, width, AP model, distance) for
-> comparison; they are **not recorded here yet** and were not measured by the agent. The **native Wi-Fi port** (`IO80211Controller`) is in progress and **does not work yet**: this driver is the one to use ([which driver, how to check, how to go back](WIFI-DRIVERS.md)).
+> comparison; they are **not recorded here yet** and were not measured by the agent. The **native front end** (`itlmt7925Native`, `IO80211Controller`) sits on top of this driver, works and is opt-in with boot-args: it gives a real Wi-Fi interface and 28-36 MB/s on the reference unit ([which mode, how to enable, how to go back](WIFI-DRIVERS.md)). **A-MSDU receive is off by default** in every level since round 26d (with it on, TCP collapses to ~50 KB/s; cause chưa xác định); `itlmt_amsdu=1` turns it back on for debugging.
 
 Verified on the reference machine (GA403WM, macOS 15.6.1 Recovery booted from a USB stick):
 
@@ -23,7 +23,7 @@ Not done, in rough order of importance:
 | Gap | Consequence |
 |---|---|
 | fixed transmit rate: legacy OFDM 6 Mb/s, no HT/VHT/HE, no aggregation, no QoS | low throughput. No benchmark has been run; do not expect more than a few Mb/s |
-| no IO80211 integration | shows up as Ethernet in System Settings; the [ItlWiFi menu bar app](#runtime-control-itlwifi-menu-bar-app) gives the scan list, join and disconnect (untested on hardware yet) |
+| no IO80211 integration in legacy mode (native mode: see [WIFI-DRIVERS.md](WIFI-DRIVERS.md)) | shows up as Ethernet in System Settings; the [ItlWiFi menu bar app](#runtime-control-itlwifi-menu-bar-app) gives the scan list, join and disconnect (untested on hardware yet) |
 | no group re-key, no power save | battery use is not optimised (reconnect after a drop: implemented with the runtime control, untested) |
 | WPA2-PSK/CCMP only | no open networks, no WPA3/SAE, no enterprise, no 6 GHz scan |
 | regulatory domain is a fixed world domain (`00`: 2.4 GHz ch 1-11, 5 GHz ch 36-165); MAC address is the one stored in the card | |
