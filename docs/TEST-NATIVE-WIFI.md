@@ -896,3 +896,19 @@ Same matrix, same AP / radio, traffic bound to the Wi-Fi interface, 10 s Apple C
   carries exactly one subframe (`subs=0/1031/0/0/0`), bundles never overflow (`ovf=0`) and nothing is "bigdrop". The loss is
   not in the unpack; why TCP collapses with A-MSDU is chưa xác định and is left off. 1400 B pings to 1.1.1.1 still lose 70 %
   at every level (chưa xác định, not a driver symptom: TCP runs at 33 MB/s).
+
+### Speed test of the shipped defaults (2026-10-14, core 322f7c94..., native 6d0e43df..., boot state, WARP off)
+
+Interface = the native Wi-Fi port, default route on it, same AP as above, traffic bound to the interface.
+
+| Test | Result |
+|---|---|
+| `networkQuality -s` downlink capacity | 293 Mb/s |
+| `networkQuality -s` uplink capacity | 45 Mb/s |
+| idle latency | 46 ms |
+| downlink / uplink responsiveness | Medium (154 ms) / Low (675 ms) |
+| 10 s Apple CDN download, 3 runs | 35.8, 33.6, 28.8 MB/s |
+
+* The download is stable at ~29-36 MB/s (one TCP stream, ~230-290 Mb/s), above the phone's 180 Mb/s on the same network.
+* Uplink is about 6 times lower than downlink and has high loaded latency: the TX path (rate selection is the firmware's, TX
+  aggregation, `retry-ratio` in `stat-log`) has not been investigated yet. Next measurement: an upload run with `stat-log` on.

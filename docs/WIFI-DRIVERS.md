@@ -1,118 +1,141 @@
-# Which Wi-Fi driver to use: `itlmt7925` (works) or the native one (does not work yet)
+# Which Wi-Fi mode to use: legacy `itlmt7925` or native (`itlmt7925` + `itlmt7925Native`)
 
 Tiếng Việt: [bên dưới](#tiếng-việt).
 
-There are **two** Wi-Fi drivers for the MT7925 in this project. They are not alternatives you can mix: the native one sits on top of
-the legacy one. **Use the legacy driver. The native driver is an experiment and does not work yet.**
+There is **one core driver** and **one optional front end**. They are not two unrelated drivers:
 
-| | **Legacy driver `itlmt7925.kext`** | **Native driver `itlmt7925Native.kext`** |
+* `itlmt7925.kext` (the **core**) drives the MT7925: firmware, DMA, 802.11 handshake, Block Ack, data path. It always has to be loaded.
+* `itlmt7925Native.kext` (the **native front end**) sits on top of the core and presents the radio to macOS as a real
+  `IO80211Controller` / Wi-Fi interface. It is idle unless the boot-arg `itlmt_native=1` is set.
+
+So there are two **modes**, chosen by boot-args only (no kext has to be removed to switch):
+
+| | **Legacy mode** (default, no `itlmt_native*` boot-arg) | **Native mode** (`itlmt_native=1 ...`) |
 |---|---|---|
-| State | ✅ works, full link speed (HE, 160 MHz), WPA2-PSK, DHCP, 4 saved networks | 🔧 **experimental, being tested and built, does not work** |
-| macOS sees it as | **Ethernet** (`en*`): no Wi-Fi menu, no System Settings Wi-Fi pane, no AirDrop | a real Wi-Fi interface (that is the goal; not reached) |
-| Network name / password | injected into the kext's `Info.plist` ([INSTALL.md §4](INSTALL.md#4-wi-fi-inject-your-network)) or set from the ItlWiFi app | not decided yet (the goal is none in the kext) |
-| Source in this repo | yes, `kexts/itlmt7925/` | **no** (work in progress elsewhere) |
-| Built by `scripts/build.sh` / in release v1 | yes | **no** |
-| Needed for | everything Wi-Fi today | nothing; leave it out |
+| macOS sees it as | **Ethernet** (`en*`): no Wi-Fi menu, no Wi-Fi pane in System Settings | a **Wi-Fi** interface: Wi-Fi menu and System Settings → Wi-Fi list, scan and join |
+| Network name / password | injected into the core's `Info.plist` ([INSTALL.md §4](INSTALL.md#4-wi-fi-inject-your-network)) or set from the ItlWiFi app | **none in the kext**: join from the Wi-Fi menu / System Settings (WPA2-PSK) |
+| Speed (reference unit, 2026-10-14) | HE / 160 MHz, same data path | **28-36 MB/s** one TCP stream, `networkQuality` 293 Mb/s down, 45 Mb/s up ([numbers](TEST-NATIVE-WIFI.md#round-26d-result-2026-10-14-a-msdu-off--33-41-mbs)) |
+| Status | ✅ stable, the long-tested path | 🔧 **works, still being tested**: not verified across sleep/wake, a long uptime or a chip recovery |
+| Not available in either | WPA3 / SAE, open networks, enterprise, 6 GHz, **AirDrop / AWDL** ([ROADMAP-AWDL.md](ROADMAP-AWDL.md)) | same |
 
-## What to do
+The shipped reference EFI (`efi/OC/config.plist`) is in **legacy mode**. Native mode is opt-in.
 
-1. **Use the legacy driver**, as in [INSTALL.md](INSTALL.md#4-wi-fi-inject-your-network):
-   * `itlmt7925.kext` is in `EFI/OC/Kexts` and enabled in `config.plist` (`Kernel -> Add`);
-   * the boot-args contain `itlmt_m1=0 itlmt_m2=1 itlmt_m3=1 itlmt_fast=6` (what each one does: [WIFI.md](WIFI.md#boot-args));
-   * there is **no** `itlmt7925Native.kext` entry, or its `Enabled` is `false`, and **no** `itlmt_native*` boot-arg.
-2. Do not install, enable or "try" `itlmt7925Native.kext` unless you are the person developing it, and you have a way to get
-   online without it (a wired adapter or USB tethering): with the experiment on, **this machine has no working Wi-Fi**.
+## Native mode: what to set
 
-## How to know which one is active
+Both kexts in `EFI/OC/Kexts` and enabled in `Kernel -> Add`: `itlmt7925.kext` first, then `itlmt7925Native.kext` (both come from
+the release `kext-v1.1` or from `scripts/build.sh itlmt7925 itlmt7925Native`). The core's `itlmt7925_m1.cpp` stays the owner of the
+hardware; the native kext only attaches to it.
+
+Boot-args (add with `tools/occonfig.py`, see below):
+
+| boot-arg | Meaning |
+|---|---|
+| `itlmt_native=1` | start the `IO80211Controller` front end |
+| `itlmt_native_if=1` | publish the Wi-Fi interface (macOS then shows a Wi-Fi port) |
+| `itlmt_native_dp=1` | connect the interface to the core's data path (without it there is an interface but no traffic) |
+| `itlmt_fast=6` | highest data-path level: Block Ack, HE, 160 MHz. A-MSDU stays **off** at every level (below) |
+| `itlmt_nopwr=1` *(optional)* | do not send the regulatory power tables at join (they changed nothing in the A/B matrix) |
+| `itlmt_stat=1` *(optional)* | publish `stat-log` / `rx-log` / `ts-log` in the registry for diagnosis |
+| `itlmt_native_nvtrace=1` *(optional)* | keep the start trace in NVRAM; leave it off for daily use |
+
+Do **not** also set `itlmt_m1/m2/m3`: those are the legacy mode's in-kext join. Do **not** set `itlmt_amsdu=1` (see below).
 
 ```bash
-kextstat | grep -E "itlmt"                         # com.itlmt7925.kext = legacy; com.itlmt7925.native = native experiment loaded
-ioreg -rc itlmt7925 -d1 | grep wifi-               # legacy: wifi-state should be "connected" (and wifi-ssid / wifi-rate ...)
-ioreg -rc itlmt7925Wifi -d1 | head                 # exists only when the native class is loaded
-sysctl -n kern.bootargs | tr ' ' '\n' | grep itlmt # the boot-args that are really in effect
+C=/Volumes/ESP/EFI/OC/config.plist          # mount the ESP first
+python3 tools/occonfig.py -c $C args add --tag pre-native -- itlmt_native=1 itlmt_native_if=1 itlmt_native_dp=1 itlmt_fast=6
+python3 tools/occonfig.py -c $C check       # ocvalidate; a config.plist.pre-native backup was written next to config.plist
 ```
 
-* Legacy working: `wifi-state = "connected"` and an `en*` device listed as Ethernet in `networksetup -listallhardwareports`.
-* Native experiment loaded: an `itlmt7925Wifi` class and an `itlmt7925WifiInterface` object exist, but nothing associates.
-  On the reference unit on 2026-10-12 the boot-args `itlmt_native=1 itlmt_native_if=1` (without `itlmt_m2/m3`) gave
-  `wifi-state = "off"`, an interface that never leaves the "not running" state and no network at all (the owner used USB tethering).
+Reboot, then join your network from the Wi-Fi menu. The interface name is stable (the unit is keyed by the MAC in
+`/Library/Preferences/SystemConfiguration/NetworkInterfaces.plist`); if you tried several earlier builds, stale `en*` entries can
+linger: remove the old Wi-Fi service in System Settings → Network and re-add it.
 
-## Going back from the experiment to the working driver
+### A-MSDU is off, on purpose
 
-Back up first. The ESP is the volume that holds `EFI/OC` (here `/Volumes/ESP`, mount it if needed); `tools/occonfig.py` writes a
-`config.plist.<tag>` backup in the same folder before each change and `check` runs `ocvalidate`:
+A-MSDU packs several Ethernet frames into one 802.11 frame. With A-MSDU accepted in the Block Ack agreement, the driver's receive
+path collapsed to ~50 KB/s on the reference unit (every frame arrives, hardware splits it, yet TCP stalls); with it off the same
+link does 33-41 MB/s. The cause is **not known (chưa xác định)**, so the default is off and `itlmt_amsdu=1` is only for debugging.
+Details: [TEST-NATIVE-WIFI.md](TEST-NATIVE-WIFI.md) (round 26).
+
+### Known limits of the native mode
+
+* Join: WPA2-PSK only; the PMK comes from macOS, the core runs the 4-way handshake.
+* 1400-byte pings to some WAN hosts lose ~70 % while TCP is fast: cause **chưa xác định**, not a throughput problem.
+* Upload (45 Mb/s) is far below download: the TX path is less tuned (rate control is the firmware's); not yet investigated.
+* After a lost link the core resets the chip and rejoins; the one-time firmware setup is redone since round 26c, but this
+  has **not** been exercised on hardware yet.
+* No AirDrop / AWDL / Handoff: that is the next workstream, [ROADMAP-AWDL.md](ROADMAP-AWDL.md).
+
+## How to know which mode is active
+
+```bash
+sysctl -n kern.bootargs | tr ' ' '\n' | grep itlmt   # boot-args really in effect
+kextstat | grep -E "itlmt"                           # com.itlmt7925.kext always; com.itlmt7925.native only if loaded
+ioreg -rc itlmt7925 -d1 | grep wifi-                 # core: wifi-state = "connected", wifi-rate, ...
+ioreg -rc itlmt7925Wifi -d1 | head                   # exists only in native mode
+networksetup -listallhardwareports | grep -A1 Wi-Fi # native: a Wi-Fi port; legacy: only an Ethernet port
+```
+
+## Going back to legacy mode
 
 ```bash
 C=/Volumes/ESP/EFI/OC/config.plist
-python3 tools/occonfig.py -c $C set 'Kernel/Add/[BundlePath=itlmt7925Native.kext]/Enabled' false --tag pre-legacy-wifi
-python3 tools/occonfig.py -c $C args del --tag pre-legacy-wifi-args -- itlmt_native=1 itlmt_native_if=1
-python3 tools/occonfig.py -c $C args add --tag pre-legacy-wifi-args2 -- itlmt_m2=1 itlmt_m3=1 itlmt_fast=6
+python3 tools/occonfig.py -c $C args del --tag pre-legacy -- itlmt_native=1 itlmt_native_if=1 itlmt_native_dp=1
+python3 tools/occonfig.py -c $C args add --tag pre-legacy2 -- itlmt_m2=1 itlmt_m3=1 itlmt_fast=6
 python3 tools/occonfig.py -c $C check
 ```
 
-Remove any other `itlmt_native_*` argument the same way (`args del -- itlmt_native_trace=1` and so on), keep `itlmt_m1=0`, reboot. If
-the machine does not come back, pick the backup `config.plist.<tag>` from the ESP (copy it over `config.plist` from Windows, Linux or
-the recovery shell). Never run NullMoth's "1401 Build" on a config you edited: it overwrites `config.plist`.
+Delete any other `itlmt_native_*` argument the same way, keep `itlmt_m1=0`, reboot. The native kext may stay installed: it is idle
+without `itlmt_native=1`. If the machine does not come back, copy the `config.plist.<tag>` backup over `config.plist` from Windows,
+Linux or the recovery shell. Never run NullMoth's "1401 Build" on a config you edited: it overwrites `config.plist`.
+Always have a wired or tethered way online before trying native mode.
 
-## What the native driver is, as far as is known
+## Source and design
 
-* A separate kext, `com.itlmt7925.native` 0.1.0, class `itlmt7925Wifi`, a subclass of `IO80211Controller`. It **matches on the legacy
-  driver** (`IOProviderClass = itlmt7925`) and depends on `com.itlmt7925.kext`, so the legacy kext must be loaded as well.
-* It needs `IO80211Family`, `IOSkywalkFamily` and `corecapture` (macOS 15 internals): another reason it is macOS 15 only.
-* Boot-args it reads (names only; their meaning is not documented yet): `itlmt_native`, `itlmt_native_if`, `itlmt_native_publish`,
-  `itlmt_native_role`, `itlmt_native_trace`, `itlmt_native_unit`, `itlmt_native_wl`. The registry property `itlmt_native_trace` on the
-  `itlmt7925Wifi` object holds the step-by-step start log (`ioreg -rc itlmt7925Wifi -d1`).
-* Design and research: [WIFI-AS-WIFI.md](WIFI-AS-WIFI.md), [IO80211-ABI.md](IO80211-ABI.md). Roadmap: workstream 6 and milestone M2
-  in [ROADMAP.md](ROADMAP.md).
-
-**When it will be the recommended one:** only when the Wi-Fi menu and System Settings pane work, it connects and keeps a
-connection across sleep/reboot, reaches at least the legacy driver's speed, and the kext source is in this repository with a
-release build. Until a release note says so, assume it is not.
+Core `kexts/itlmt7925/`, front end `kexts/itlmt7925Native/`; both are built by `scripts/build.sh` and published by the `kext-v*`
+release workflow. Clean-room (no `itlwm` / `AirportItlwm` / OWL code): the Apple-side contracts were derived from the macOS 24H32
+binaries, read-only. Design and research: [NATIVE-WIFI.md](NATIVE-WIFI.md), [WIFI-AS-WIFI.md](WIFI-AS-WIFI.md),
+[IO80211-ABI.md](IO80211-ABI.md); test log: [TEST-NATIVE-WIFI.md](TEST-NATIVE-WIFI.md).
 
 ---
 
 ## Tiếng Việt
 
-Dự án có **hai** driver Wi-Fi cho MT7925. Chúng **không** thay thế lẫn nhau để trộn: driver native chạy chồng lên driver legacy.
-**Hãy dùng driver legacy. Driver native chỉ là bản thử nghiệm và chưa chạy được.**
+Có **một driver lõi** và **một lớp trước tuỳ chọn**:
 
-| | **Legacy `itlmt7925.kext`** | **Native `itlmt7925Native.kext`** |
+* `itlmt7925.kext` (**lõi**) điều khiển MT7925: firmware, DMA, bắt tay 802.11, Block Ack, đường dữ liệu. Luôn phải nạp.
+* `itlmt7925Native.kext` (**lớp native**) nằm trên lõi, đưa card lên macOS dưới dạng `IO80211Controller` / giao diện Wi-Fi thật.
+  Nó đứng yên nếu không có boot-arg `itlmt_native=1`.
+
+Hai **chế độ**, chọn chỉ bằng boot-args (không phải gỡ kext):
+
+| | **Legacy** (mặc định, không có `itlmt_native*`) | **Native** (`itlmt_native=1 ...`) |
 |---|---|---|
-| Trạng thái | ✅ chạy, đạt tốc độ tối đa của link (HE, 160 MHz), WPA2-PSK, DHCP, lưu 4 mạng | 🔧 **thử nghiệm, đang test và build, chưa chạy** |
-| macOS thấy là | **Ethernet** (`en*`): không có menu Wi-Fi, không có mục Wi-Fi trong System Settings, không AirDrop | giao diện Wi-Fi thật (là mục tiêu, chưa đạt) |
-| Tên mạng / mật khẩu | inject vào `Info.plist` của kext ([INSTALL.vi.md §4](INSTALL.vi.md#4-wi-fi-inject-mạng)) hoặc đặt từ app ItlWiFi | chưa chốt (mục tiêu: không để trong kext) |
-| Mã nguồn trong repo | có, `kexts/itlmt7925/` | **không** (đang làm ở nơi khác) |
-| Có trong `scripts/build.sh` / release v1 | có | **không** |
-| Cần cho | mọi thứ liên quan Wi-Fi hiện nay | không cần gì; đừng đưa vào |
+| macOS thấy là | **Ethernet** (`en*`): không có menu Wi-Fi | giao diện **Wi-Fi**: menu Wi-Fi, mục Wi-Fi trong System Settings, quét và kết nối |
+| Tên mạng / mật khẩu | inject vào `Info.plist` của lõi hoặc đặt từ app ItlWiFi | **không để trong kext**: kết nối từ menu Wi-Fi (WPA2-PSK) |
+| Tốc độ (máy tham chiếu 2026-10-14) | HE / 160 MHz | **28-36 MB/s** một luồng TCP; `networkQuality` 293 Mb/s xuống, 45 Mb/s lên |
+| Trạng thái | ✅ ổn định, đã dùng lâu | 🔧 **chạy được, đang test**: chưa kiểm chứng qua sleep/wake, uptime dài, hay chip recovery |
+| Chưa có ở cả hai | WPA3, mạng mở, enterprise, 6 GHz, **AirDrop / AWDL** | như vậy |
 
-### Việc cần làm
+EFI tham chiếu trong release dùng **legacy**. Native là tuỳ chọn bật thêm.
 
-1. **Dùng driver legacy**, theo [INSTALL.vi.md](INSTALL.vi.md#4-wi-fi-inject-mạng):
-   * `itlmt7925.kext` nằm trong `EFI/OC/Kexts` và được bật trong `config.plist` (`Kernel -> Add`);
-   * boot-args có `itlmt_m1=0 itlmt_m2=1 itlmt_m3=1 itlmt_fast=6` (ý nghĩa từng cái: [WIFI.md](WIFI.md#boot-args));
-   * **không có** mục `itlmt7925Native.kext`, hoặc `Enabled` = `false`, và **không có** boot-arg `itlmt_native*`.
-2. Đừng cài, bật hay "thử" `itlmt7925Native.kext` trừ khi bạn là người đang phát triển nó và có cách lên mạng khác (USB LAN hoặc
-   tethering qua điện thoại): khi bật thử nghiệm, **máy không có Wi-Fi dùng được**.
+### Bật native
 
-### Cách biết đang chạy driver nào
+Cả hai kext trong `EFI/OC/Kexts` và bật trong `Kernel -> Add` (`itlmt7925.kext` trước). Boot-args:
+`itlmt_native=1 itlmt_native_if=1 itlmt_native_dp=1 itlmt_fast=6` (bảng ý nghĩa ở phần tiếng Anh). Không thêm `itlmt_m1/m2/m3`,
+không thêm `itlmt_amsdu=1`. Dùng đúng khối lệnh `occonfig.py` ở trên (tự tạo backup `config.plist.<tag>`), reboot, rồi kết nối mạng từ
+menu Wi-Fi.
 
-Dùng đúng các lệnh ở phần tiếng Anh phía trên (`kextstat`, `ioreg -rc itlmt7925 -d1 | grep wifi-`, `ioreg -rc itlmt7925Wifi -d1`,
-`sysctl -n kern.bootargs`):
+**A-MSDU tắt có chủ đích:** bật A-MSDU trong Block Ack làm tốc độ nhận tụt còn ~50 KB/s; tắt thì 33-41 MB/s. Nguyên nhân
+**chưa xác định**, nên mặc định tắt.
 
-* Legacy chạy tốt: `wifi-state = "connected"` và có một thiết bị `en*` hiện là Ethernet.
-* Native thử nghiệm đã nạp: có class `itlmt7925Wifi` và object `itlmt7925WifiInterface`, nhưng không kết nối được gì. Trên máy tham chiếu
-  ngày 2026-10-12, boot-args `itlmt_native=1 itlmt_native_if=1` (không có `itlmt_m2/m3`) cho `wifi-state = "off"`, giao diện không bao giờ
-  chuyển sang trạng thái chạy, và không có mạng (chủ máy dùng USB tethering).
+**Giới hạn của native:** chỉ WPA2-PSK; ping 1400 byte ra WAN mất ~70 % trong khi TCP nhanh (chưa xác định); upload (45 Mb/s) thấp hơn
+nhiều so với download; đường chip recovery sau khi mất link chưa được thử trên máy; chưa có AirDrop / AWDL (xem
+[ROADMAP-AWDL.md](ROADMAP-AWDL.md)).
 
-### Quay lại driver chạy được từ bản thử nghiệm
+### Quay lại legacy
 
-Sao lưu trước. `tools/occonfig.py` tự ghi bản `config.plist.<tag>` cùng thư mục trước mỗi lần sửa, `check` chạy `ocvalidate`. Dùng đúng
-khối lệnh trong phần tiếng Anh ("Going back from the experiment"): tắt `itlmt7925Native.kext`, xoá `itlmt_native=1 itlmt_native_if=1`
-(và mọi `itlmt_native_*` khác), thêm `itlmt_m2=1 itlmt_m3=1 itlmt_fast=6`, giữ `itlmt_m1=0`, rồi reboot. Nếu máy không lên, chép bản
-backup `config.plist.<tag>` đè lên `config.plist` từ Windows, Linux hoặc recovery. Đừng chạy "1401 Build" của NullMoth trên config đã sửa
-tay: nó ghi đè `config.plist`.
-
-### Khi nào native trở thành bản được khuyên dùng
-
-Chỉ khi menu Wi-Fi và mục Wi-Fi trong System Settings chạy, kết nối được và giữ kết nối qua sleep/reboot, tốc độ không thấp hơn
-legacy, và mã nguồn kext đã có trong repo cùng bản build trong release. Cho đến khi release note nói như vậy, hãy coi như chưa.
+Dùng khối lệnh "Going back to legacy mode": bỏ `itlmt_native=1 itlmt_native_if=1 itlmt_native_dp=1`, thêm `itlmt_m2=1 itlmt_m3=1
+itlmt_fast=6`, giữ `itlmt_m1=0`, reboot. Kext native để nguyên cũng được (không có `itlmt_native=1` nó đứng yên). Luôn chuẩn bị sẵn
+đường lên mạng khác (USB LAN / tethering) trước khi thử native. Nếu máy không lên: chép `config.plist.<tag>` đè lên `config.plist`
+từ Windows, Linux hoặc recovery. Đừng chạy "1401 Build" của NullMoth trên config đã sửa tay.

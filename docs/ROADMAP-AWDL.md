@@ -4,6 +4,19 @@ Status 2026-10-14: **research phase, no code**. This file records what was found
 and the phase plan. Nothing here is promised. Decision taken with the user on 2026-10-14: implement real AWDL in the driver
 (not the `BrowseAllInterfaces` shortcut). Phase 0 and 1 are zero-risk and come first.
 
+## 0. How this work stays out of the way (agreed 2026-10-14)
+
+The native Wi-Fi front end is merged into `main` and under test. AWDL is a **separate workstream** and must not disturb it:
+
+* AWDL work lives on its own branch cut from `main` (`awdl-*`), never on the Wi-Fi test branch, and is merged by pull request.
+* New code goes into **new files** (`kexts/itlmt7925Native/itlmt7925_awdl*.cpp`, `docs/awdl/`, `tools/awdl_*`). Changes to the
+  existing core / front end files are limited to a hook and are kept small, so they merge cleanly with the Wi-Fi fixes.
+* Everything AWDL is behind its own boot-arg (`itlmt_awdl=1`, off by default). With the boot-arg absent the code paths are not
+  entered: the verified Wi-Fi behaviour (33-41 MB/s, A-MSDU off) is unchanged.
+* Phases 0 and 1 do not touch the data path at all (read-only research, then log-only observation).
+* The EFI / OpenCore is not rebuilt for this: kext changes ship in a kext-only release (`kext-v*`, see
+  [WIFI-DRIVERS.md](WIFI-DRIVERS.md)).
+
 ## 1. Goal and definition of done
 
 * AirDrop between this machine and an iPhone / Mac works in both directions with the Wi-Fi connection kept.
