@@ -96,19 +96,18 @@ int itlmt7925::efuseRead(uint32_t off, uint8_t *val)
     uint32_t evl = 0;
     int rc = uniSend(UNI_EFUSE_CTRL, req, sizeof(req), true, ev, sizeof(ev), &evl, 3000);
     if (rc) return rc;
-    // Linux (mt7925_mcu_read_eeprom) only takes data[off % 16] of the 124-byte event: rsv[4], tag, len, ver, addr, valid, size,
-    // magic, type, rsv1[4], data[32] after the 44-byte RXD, and checks none of the header fields. Do the same; when a header
-    // field is not what was asked for, keep the first bytes in m3-log (bytes 40..135: end of the RXD + the payload).
-    if (evl < 44 + 48 + 16) { m3log("efuse ev too short len=%u", evl); return ITL_EIO; }
-    if (ev[44 + 4] != 1 || ev[44 + 5] != 0 || le32(ev + 44 + 12) != a || !le32(ev + 44 + 16)) {
-        for (uint32_t o = 40; o < 136 && o < evl; o += 32) {
-            char hex[2 * 32 + 1];
-            uint32_t n = evl - o < 32 ? evl - o : 32;
-            for (uint32_t i2 = 0; i2 < n; i2++) snprintf(hex + 2 * i2, 3, "%02x", ev[o + i2]);
-            m3log("efuse ev len=%u want=%x +%u: %s", evl, a, o, hex);
-        }
-    }
+    // tag: 1 expected from the Linux driver's struct, but the first hardware run (2026-10-12) returned tag 2 with the matching
+    // addr and valid=1, so both are taken; the address check below is what ties the event to this request
+    if (evl < 44 + 48 + 16 || (ev[44 + 4] != 1 && ev[44 + 4] != 2) || ev[44 + 5] != 0 || le32(ev + 44 + 12) != a ||
+        !le32(ev + 44 + 16)) {
+        // first hardware run (2026-10-12): every join failed here with -5; keep what the event looked like
+        m3log("efuse event rejected: len=%u tag=%02x%02x addr=%08x want=%08x valid=%08x", evl, evl > 49 ? ev[44 + 5] : 0,
+              evl > 48 ? ev[44 + 4] : 0, evl >= 60 ? le32(ev + 44 + 12) : 0, a, evl >= 64 ? le32(ev + 44 + 16) : 0);
+        return ITL_EIO;
+    }                  // rxd, then rsv, tag, len, ver, addr, valid, size, magic, type, rsv1[4]
     *val = ev[44 + 48 + (off & 15)];
+    m3log("efuse %03x tag=%u block=%02x%02x%02x%02x%02x%02x%02x%02x", off, ev[44 + 4], ev[44 + 48], ev[44 + 49], ev[44 + 50],
+          ev[44 + 51], ev[44 + 52], ev[44 + 53], ev[44 + 54], ev[44 + 55]);
     return 0;
 }
 
@@ -224,16 +223,16 @@ int itlmt7925::m3TxPower()
                 uint32_t freq = g2 ? (ch == 14 ? 2484u : 2407u + 5u * ch) : 5000u + 5u * ch;
                 uint8_t *e = msg + 52 + (unsigned)j * (1 + SKU_LEN);
                 e[0] = ch;
-                // The world domain supplies a conservative 20 dBm ceiling; CLC may lower it further.
+                // The world domain supplies a conservative ceiling (pwrCeil, 40 = 20 dBm); CLC may lower it further.
                 int8_t limit = sarFor(sarPwr, freq);
-                if (limit > 40) limit = 40;
+                if (limit > (int8_t)pwrCeil) limit = (int8_t)pwrCeil;
                 buildSku((int8_t *)e + 1, limit, g2);
             }
             rc = powerCmd(msg, len, "txpower_batch");
             cmds++;
         }
     }
-    m3log("txpower: %d commands, world ceiling 40, SAR 2g %d 5g %d (0.5 dBm) rc=%d",
-          cmds, sarFor(sarPwr, 2437), sarFor(sarPwr, 5200), rc);
+    m3log("txpower: %d commands, world ceiling %u, SAR 2g %d 5g %d (0.5 dBm) rc=%d",
+          cmds, (unsigned)pwrCeil, sarFor(sarPwr, 2437), sarFor(sarPwr, 5200), rc);
     return rc;
 }
