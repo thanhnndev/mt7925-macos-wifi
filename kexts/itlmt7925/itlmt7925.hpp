@@ -262,6 +262,9 @@ private:
     uint8_t fastLevel = 0;                   // requested by the boot-arg
     uint8_t lvl = 0;                         // level of the current attempt, 0 = legacy 6 Mb/s
     uint8_t lvlCap = 255;                    // highest level not given up on the current network (reset when the network changes)
+    char capSsid[33] = {0};                  // the network lvlCap belongs to: kept across disconnects and failed joins, so that a
+    uint32_t capMs = 0;                      // retry from the user starts at the level that worked, not at itlmt_fast again (10 min)
+    uint8_t capBand = 0;                     // band the cap was learned on (1 = 2.4 GHz, 2 = 5 GHz): another band starts over
     bool m3stepDown = false;                 // set when the attempt at `lvl` failed; m3Run() then retries one level lower
     bool m3stepRadio = false;                // ... because of radio conditions (tx failing), not because the AP rejects the level
     bool m3reachedAssoc = false;
@@ -343,6 +346,8 @@ private:
     char m1buf[3072] = {0};
     size_t m1len = 0;
     bool m1Started = false;
+    bool regPending = false;              // native mode: registerService() waits until the firmware MAC is known (publishService)
+    void publishService();
     bool driverOwn();
     void dumpState();
     void holdLog();
@@ -384,7 +389,7 @@ private:
     void nativeNets(struct ItlNativeNets *n);
     volatile bool m3lost = false;            // the AP sent deauthentication / disassociation, or went silent
     char m3lostWhy[48] = {0};
-    char evbuf[1500] = {0};                  // wifi-events: the last link events of this boot, one per line, oldest first
+    char evbuf[6000] = {0};                  // wifi-events: the last link events of this boot, one per line, oldest first
     size_t evlen = 0;
     void evLog(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
     uint32_t tgtLastBcnMs = 0, lastRxDataMs = 0;

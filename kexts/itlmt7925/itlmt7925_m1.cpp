@@ -561,13 +561,16 @@ void itlmt7925::m1Main()
     char s[48];
     snprintf(s, sizeof(s), "M1 rc=%d", rc);
     nvramLog(s);
+    if (rc != 0) publishService();                           // no firmware: the (radio-less) interface still has to exist
     if (rc == 0 && m2On) {
         int r2 = m2Run();
         m2log("RESULT rc=%d", r2);
         snprintf(s, sizeof(s), "M1 rc=0 M2 rc=%d", r2);
         nvramLog(s);
+        publishService();                                    // normally done by m2Run() right after the address is read
         if (m3On) m3Supervise();                             // connects, reconnects and takes user-client commands; never returns
     }
+    publishService();
 }
 
 void itlmt7925::m1Thread(void *arg)

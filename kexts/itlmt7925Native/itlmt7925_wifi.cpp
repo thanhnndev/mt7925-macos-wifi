@@ -320,6 +320,7 @@ bool itlmt7925Wifi::makeInterface(IOService *provider)
         IOLog(LOGT "no IOMACAddress under the core driver, using a placeholder\n");
     }
     memcpy(stationAddress, mac, sizeof(stationAddress));
+    itlmtTrace(this, "mk:mac %s", (mac[0] == 0x02 && mac[1] == 0x00 && mac[2] == 0x79 && mac[3] == 0x25) ? "placeholder" : "from core");
     // Role 1 is the primary station interface. Role 2 (LowLatency) is a secondary one: IO80211SkywalkInterface::start needs
     // ivars->parentInterface for it (it logs a failure at IO80211SkywalkInterface.cpp:0x1f8 otherwise), createSkywalkInterface only
     // makes it from a bus flag and passes the parent as its 4th argument. itlmt_native_role=2 keeps the old path for comparison.

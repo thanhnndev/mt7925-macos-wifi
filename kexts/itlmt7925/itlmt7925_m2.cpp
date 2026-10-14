@@ -299,7 +299,9 @@ int itlmt7925::m2Scan(const char *ssidArg)
     memset(w + 4, 0xff, 6);
     w += 16;
     put16(w + 0, 12); put16(w + 2, 136);            // UNI_SCAN_CHANNEL
-    static const uint8_t chans[][2] = { {1, 1}, {1, 6}, {1, 11}, {2, 36}, {2, 40}, {2, 44}, {2, 48}, {2, 149}, {2, 153},
+    // every 2.4 GHz channel a network is commonly on (a router left on auto picks any of 1..11), then the 5 GHz set
+    static const uint8_t chans[][2] = { {1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}, {1, 8}, {1, 9}, {1, 10}, {1, 11},
+                                        {2, 36}, {2, 40}, {2, 44}, {2, 48}, {2, 149}, {2, 153},
                                         {2, 157}, {2, 161}, {2, 165} };
     w[4] = 4;                                         // specified channels
     w[5] = sizeof(chans) / sizeof(chans[0]);
@@ -396,6 +398,7 @@ int itlmt7925::m2Run()
         if (!usable) memcpy(mac, nativeMac, 6);
         setProperty("IOMACAddress", mac, 6);
         setProperty("itlmt_mac_source", usable ? "firmware" : "placeholder");
+        publishService();                                    // the native kext matches now and reads IOMACAddress at start
     }
     m2log("mac=%02x:%02x:%02x:%02x:%02x:%02x%s", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], gotMac ? "" : " (default)");
 

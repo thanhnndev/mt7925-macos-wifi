@@ -577,7 +577,14 @@ void itlmt7925::m3Supervise()
             wifiState("idle", "");
         }
         if (c & CMD_JOIN) {
-            if (strcmp(user.ssid, j.ssid) != 0) lvlCap = 255;      // another network: its own ladder
+            // Another network, or a cap learned more than 10 min ago: start from itlmt_fast again. The cap survives a disconnect
+            // and a failed join of the same network (the Family retries from the start each time; every retry used to spend
+            // 30+ s walking down the same ladder again).
+            if (strcmp(capSsid, j.ssid) != 0 || nowMs() - capMs > 600000) {
+                lvlCap = 255;
+                capBand = 0;
+                strlcpy(capSsid, j.ssid, sizeof(capSsid));
+            }
             user = j;
             userNative = j.native;
             haveUser = true; want = true; everUp = false; fails = 0; nextTry = 0; away = false;

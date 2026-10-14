@@ -629,3 +629,46 @@ curl `--interface en4` cannot measure it. Apple's `networkQuality -I en4` does w
 3. `system_profiler SPAirPortDataType`: the interface address is the firmware MAC, rate / PHY higher than 54 if `fast: on`.
 4. `networkQuality -I en4` against the round-20 baseline (15.4 / 8.8 Mb/s); `m3-log` for `fast: on lvl=` and `stRxDupL`.
 5. `route -n get default`: still `en1` until the service order is changed by the user.
+
+## Round 23 (2026-10-14): station address regression, ladder memory, wider scan
+
+Report after the round 22 reboot: scans list too few networks, joins fail, and a join that succeeds has no internet.
+
+### Causes found
+
+* **Address mismatch (the regression of round 22, "joined but no internet").** Round 22 made the radio use the firmware MAC on
+  air, but the native interface was registered before M2 had read it, so the interface kept the placeholder address. DHCP /
+  ARP replies were addressed to a station the AP never heard of (`itlmt_rx_received` stayed 0). The two must be the same.
+* **Ladder restarts at the top on every retry.** The cap that remembers a given-up level was reset on every failed join, so each
+  retry from the Family walked `itlmt_fast=6 -> 5 -> 4 -> ... ` again (30+ s each).
+* **Scan list short.** Only channels 1 / 6 / 11 were probed on 2.4 GHz (60 / 120 ms dwell); a router on 2..10 was never seen.
+
+### Change
+
+* Core `start()`: in native mode (`itlmt_native_dp=1` and `itlmt_m1`) `registerService()` is deferred (`regPending`);
+  `publishService()` runs as soon as M2 has set `IOMACAddress`, or when M1 / M2 gave up, so the interface always reads the address
+  the radio uses. Note line: `registerService (native: address known|not read)`.
+* Ladder: RX-BA-only level (2) is skipped (`3 -> 1`); the cap (`lvlCap`) is kept per SSID and band (`capSsid`, `capBand`,
+  `capMs`) across disconnects and failed joins, and expires after 10 min or when another network / band is joined
+  (event `band changed (cap learned on ...)`).
+* Watchdog "no unicast frame received" fires after 15 s instead of 25 s and logs tx / fail / fwfail / free / rxd / eapol / eth.
+* Event ring (`evbuf`) 1500 -> 6000 bytes; `handshake failed: m1= m2= m3= rx= ...` is also an event now.
+* Legacy association advertises the 2.4 GHz CCK + OFDM rate set (as the fast path did) so an AP whose basic rates are CCK accepts it.
+* Scan list: 2.4 GHz channels 1..11 (was 1 / 6 / 11), plus the 5 GHz set as before.
+* Native trace line `mk:mac from core|placeholder` (no address value).
+
+### Install
+
+* Backups: `build/esp-backup-{native,core}-round22-pre.kext` (byte-for-byte verified before the replace).
+* Installed: native 932c4dbe..., core 4013ec79..., boot-args unchanged. Undo: copy the two backups over
+  `/Volumes/ESP/EFI/OC/Kexts/itlmt7925Native.kext` and `itlmt7925.kext`.
+
+### One reboot, read in this order
+
+1. `ioreg -l -w0 | grep -E "itlmt_mac_source|IOMACAddress"` (core) and `ifconfig en4 | grep ether`: same address.
+   `itlmt_native_trace_tail` must contain `mk:mac from core`.
+2. `wifi-networks` (networks listed; more than before) and `wifi-events` (`level N -> M`, `no unicast frame ... tx= fail=`,
+   `handshake failed: ...`).
+3. After a join: `itlmt_rx_received` > 0, `ipconfig getifaddr en4`, `networkQuality -I en4`.
+4. Leave and join the same network again: `m3-log` shows the start level is the cap, not 6.
+5. Default route is a user setting: `networksetup -ordernetworkservices "Wi-Fi" "<tether name>"` (WARP refuses `curl --interface en4`).

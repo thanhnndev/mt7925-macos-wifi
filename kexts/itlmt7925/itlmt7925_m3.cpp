@@ -727,8 +727,10 @@ int itlmt7925::m3Assoc()
     uint8_t f[320];
     m3Hdr(f, 0x00, tgtBssid, mac);
     uint8_t *p = f + 24;
-    bool g2 = fastActive && tgtCh <= 14;
-    put16(p, g2 ? 0x0431 : 0x0411); p += 2;                      // ESS | PRIVACY | short slot (| short preamble on 2.4 GHz)
+    // 2.4 GHz: advertise the CCK rates the AP's basic set usually contains also on the legacy path (an AP whose basic rates are
+    // 1/2/5.5/11 refuses a station that offers OFDM only)
+    bool g2 = tgtCh <= 14;
+    put16(p, g2 ? 0x0431 : 0x0411); p += 2;                     // ESS | PRIVACY | short slot (| short preamble on 2.4 GHz)
     put16(p, 10); p += 2;                                        // listen interval
     uint8_t sl = (uint8_t)strlen(m3ssid);
     *p++ = 0; *p++ = sl; memcpy(p, m3ssid, sl); p += sl;
@@ -816,6 +818,14 @@ int itlmt7925::m3Run1()
     m3log("target %02x:%02x:%02x:%02x:%02x:%02x ch=%u cap=%04x bi=%u ies=%u", tgtBssid[0], tgtBssid[1], tgtBssid[2],
           tgtBssid[3], tgtBssid[4], tgtBssid[5], tgtCh, tgtCap, tgtBcnInt, tgtIeLen);
 
+    // A level given up on 2.4 GHz says nothing about 5 GHz (and the other way round): another band starts from the top again.
+    if (m3fast && capBand && capBand != (tgtCh <= 14 ? 1 : 2)) {
+        evLog("band changed (cap learned on %s): level %u -> %u", capBand == 1 ? "2.4 GHz" : "5 GHz", lvl, fastLevel);
+        lvlCap = 255;
+        capBand = 0;
+        lvl = fastLevel;
+    }
+
     // PMK now (4096 PBKDF2 iterations), kept for the 4-way handshake; native Wi-Fi hands over the key its supplicant derived
     uint8_t pmk[32];
     if (nets[sel].hasPmk) memcpy(pmk, nets[sel].pmk, sizeof(pmk));
@@ -882,6 +892,7 @@ int itlmt7925::m3Run()
         uint8_t next = lvl - 1;
         // levels 4..6 add features only where the AP offers them: skip the ones that would repeat the configuration that just failed
         while (next >= 4 && fastSig(next) == fastSig(lvl)) next--;
+        if (next == 2) next = 1;                             // RX Block Ack alone buys nothing without TX Block Ack: one attempt less
         baLog("level %u given up, connecting again at %u", lvl, next);
         evLog("level %u -> %u%s", lvl, next, m3stepRadio ? " (radio; next connection starts high again)" : "");
         m3Teardown();
@@ -889,7 +900,11 @@ int itlmt7925::m3Run()
         // A level the AP does not work with stays given up for this network. Failing transmissions are radio conditions
         // (distance, interference, a busy 160 MHz channel): run lower now, but let the next connection try the full level again,
         // instead of staying slow for the rest of the boot after one bad minute.
-        if (!m3stepRadio) lvlCap = next;
+        if (!m3stepRadio) {
+            lvlCap = next;
+            capMs = nowMs() ? nowMs() : 1;
+            capBand = tgtCh <= 14 ? 1 : 2;
+        }
     }
 }
 
@@ -1422,6 +1437,7 @@ int itlmt7925::m3Handshake()
         bzero(&ptk, sizeof(ptk));
         bzero(snonce, sizeof(snonce));
         m3log("eapol: %s", have1 ? "no valid msg3" : "no msg1");
+        evLog("handshake failed: %s", summary);
         return (badMic || m3hsApLeave) ? ITL_EIO : ITL_TIMEOUT;
     }
     m3log("eapol m3 info=%04x mic ok datalen=%u", k.info, k.datalen);
@@ -1545,11 +1561,12 @@ void itlmt7925::m3Link()
         }
         ethFlush();
         uint32_t up = (now - t0) / 1000;
-        if (fastActive && !watchdogDone && up >= 25) {
+        if (fastActive && !watchdogDone && up >= 15) {
             watchdogDone = true;
             if (!stRxUni && stTx >= 2) {                     // we transmitted, and no unicast frame ever came back: HT/VHT is not working
                 baLog("lvl %u: no unicast rx in %us (tx=%u rxd=%u eth=%u)", lvl, up, stTx, stRxData, stRxEth);
-                evLog("lvl %u: no unicast frame received in %us", lvl, up);
+                evLog("lvl %u: no unicast frame received in %us tx=%u fail=%u fwfail=%u free=%u rxd=%u eapol=%u eth=%u", lvl, up,
+                      stTx, stTxFail, stTxFwFail, stTxFree, stRxData, stRxEapol, stRxEth);
                 m3stepDown = true;
             }
         }
