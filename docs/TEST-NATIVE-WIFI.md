@@ -818,3 +818,22 @@ checksums). Candidates left: power tables (uplink power / control responses), th
   tables, J SAR ceiling, K reorder 10 ms. Each: gateway / WAN pings at 1400 B and 56 B, 10 s download, counters before / after.
 * Install: backups `build/esp-backup-{core,native}-round26-pre.kext`, `build/config.plist.round26-pre`; boot-args
   `itlmt_no160` and `itlmt_reo` removed, `itlmt_nopwr=1 itlmt_stat=1` added. Tools in `build/itl-ab/` (survive the reboot).
+
+### Round 26 first boot (2026-10-14): link lost at 839 s, never rejoined; matrix measured the wrong path
+
+* **Wi-Fi 2 service.** macOS keys interface units by MAC address (`NetworkInterfaces.plist`). The MAC changed across rounds
+  (placeholder `02:00:79:25:00:01` = en4, firmware MAC = en2, firmware + locally administered bit = en5), so every change created
+  a new unit and a new service ("Wi-Fi", "Wi-Fi 2"). The MAC is final now: en5 stays en5. The stale entries (en2, en4, ...) and
+  the stale "Wi-Fi" service can be removed by hand; nothing in the driver needs to change for it.
+* **Link loss.** `wifi-events`: `843s silent for 4 s: driverOwn=1`, `854s lost after 839s at lvl 6: no beacon or data from the AP
+  for 15 s`, `855s chip not answering: reset and firmware reload #1`, `858s recover #1 rc=0`, then `native join failed: network
+  not found` (x2) and `the access point refused authentication` (x2); the supervisor then stopped. The postmortem registers
+  (`lp=0`, `misc=3` where the boot value was 1, no interrupts pending) say the chip stopped answering; why it stopped is
+  chưa xác định.
+* **Bug found in the recovery path.** `chipRecover()` reloads the firmware but `m3hw` stayed true, so `fw_log`,
+  `eeprom(efuse)` and `rts_thresh` (the cold-start one-time setup) were not sent again, and the CLC / SKU power tables were not
+  either. The `m3-log` after `recover: M2` shows `set_domain` and nothing else. `chipRecover()` now clears `m3hw` and `clcCc[0]`.
+  Whether this is why scans found nothing after the reset is not measured yet.
+* **The first matrix run measured the phone tether.** The default route was the tether (en1): the "gateway" was the phone, the
+  11.6 MB/s download and the unchanged counters were not Wi-Fi at all. `itl-ab.sh` now binds every ping / download to the
+  Wi-Fi interface (`ping -b`, `curl --interface`), takes the gateway from that interface and stops if it has no router.

@@ -1017,6 +1017,8 @@ bool itlmt7925::chipRecover()
     fastActive = false;
     txPool = false;
     txClrAll();
+    m3hw = false;                                            // a reloaded firmware has none of the one-time setup (fw_log, efuse, RTS): redo it
+    clcCc[0] = 0;                                            // ... nor the CLC / SKU power tables
     ringFree(txWm);
     ringFree(txFwdl);
     ringFree(rxEvt);
