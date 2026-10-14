@@ -396,8 +396,13 @@ int itlmt7925::m2Run()
         const bool zero = !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]);
         const bool usable = gotMac && !zero && !(mac[0] & 1);
         if (!usable) memcpy(mac, nativeMac, 6);
+        // The Family sets the locally administered bit on the interface address (its "private address" step: dc:.. becomes
+        // de:..) while setMacAddress is refused, so a globally unique address on air and the interface's one differ in that
+        // bit alone: DHCP answers were addressed to the interface address, which no station on the AP has (joined, no data
+        // back, only EAPOL ever received). Using the address with the bit already set makes the two the same.
+        mac[0] |= 0x02;
         setProperty("IOMACAddress", mac, 6);
-        setProperty("itlmt_mac_source", usable ? "firmware" : "placeholder");
+        setProperty("itlmt_mac_source", usable ? "firmware+LA" : "placeholder");
         publishService();                                    // the native kext matches now and reads IOMACAddress at start
     }
     m2log("mac=%02x:%02x:%02x:%02x:%02x:%02x%s", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], gotMac ? "" : " (default)");

@@ -672,3 +672,22 @@ Report after the round 22 reboot: scans list too few networks, joins fail, and a
 3. After a join: `itlmt_rx_received` > 0, `ipconfig getifaddr en4`, `networkQuality -I en4`.
 4. Leave and join the same network again: `m3-log` shows the start level is the cap, not 6.
 5. Default route is a user setting: `networksetup -ordernetworkservices "Wi-Fi" "<tether name>"` (WARP refuses `curl --interface en4`).
+
+### Round 23 result and round 23b (2026-10-14)
+
+Boot with round 23 installed: the Wi-Fi interface came up as `en2` (firmware address, `itlmt_mac_source` = firmware), join and
+4-way handshake complete at every level, but no data ever came back (`itlmt_rx_received` 0, only the two EAPOL frames received,
+DHCP answered nowhere, `no unicast frame received in 15s` at levels 6, 5, 3, 1 and 0 alike).
+
+* **Cause:** `ifconfig en2` showed `de:..` while the radio used `dc:..` (same bytes, locally administered bit set). The Family
+  applies that bit to the interface address itself (private-address step; `setMacAddress` is refused, so the radio keeps the
+  original). The DHCP server answers to the client hardware address in the request (the interface one), which is not a station
+  on the AP. The earlier placeholder address (`02:..`) already had the bit set, which is why rounds 18-21 were not affected.
+* **Change (core, `itlmt7925_m2.cpp`):** the address used on air and published as `IOMACAddress` has bit 1 of byte 0 set
+  (`itlmt_mac_source` = `firmware+LA`). Interface address and on-air address are now the same value.
+* **Install:** backups `build/esp-backup-{native,core}-round23-pre.kext` (the round 23 binaries, native 932c4dbe..., core 4013ec79...);
+  installed core b8c1ea53..., native b8b7fdfe.... Undo: copy the backups back.
+* **One reboot, read:** `ifconfig <wifi>` ether equals `ioreg IOMACAddress` of the core; `itlmt_mac_source` = `firmware+LA`;
+  `itlmt_rx_received` > 0; `ipconfig getifaddr <wifi>`; `wifi-events` shows `up lvl 6` and no `no unicast frame`.
+* **Noted, not changed:** the first join after boot can fail with `auth-fail` (4 authentication frames unanswered although frames
+  were received) and succeed on the retry; the interface BSD name is now `en2` (was `en4`) because the service order changed.
