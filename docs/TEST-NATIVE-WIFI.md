@@ -869,3 +869,30 @@ traffic bound to the Wi-Fi interface, 10 s Apple CDN download; same AP, same rad
 **Round 26d change.** A-MSDU is off by default: `noAmsdu = true`, so levels 4..6 keep HE and 160 MHz but the agreement does not
 accept A-MSDU. Boot-arg `itlmt_amsdu=1` or run time `itl_amsdu=1` (with the next reconnect) turn it back on. `tools/itl-ab.sh`
 matrix: A-MSDU off at L6/160, L6/80, L5, L4, L3, then A-MSDU on at L6 and L4 for comparison, tables, reorder 10 / 100 ms.
+
+### Round 26d result (2026-10-14): A-MSDU off = 33-41 MB/s
+
+Same matrix, same AP / radio, traffic bound to the Wi-Fi interface, 10 s Apple CDN download:
+
+| Config | Download |
+|---|---|
+| A  L6 HE 160 MHz, A-MSDU off (boot state) | 33.1 MB/s |
+| B  L6 HE 80 MHz | 11.0 MB/s |
+| C  L5 VHT 160 MHz | 19.5 MB/s |
+| D  L4 VHT 80 MHz | 13.9 MB/s |
+| E  L3 VHT 80 MHz | 31.6 MB/s |
+| **F  L6 HE 160 MHz, A-MSDU ON** | **0.057 MB/s** |
+| G  L4 VHT 80 MHz, A-MSDU ON | 0.048 MB/s |
+| H  L6 HE 160 MHz, A-MSDU off again | 41.2 MB/s |
+| I  H + CLC/SKU tables (20 dBm) | 23.6 MB/s |
+| J  reorder 10 ms | 38.2 MB/s |
+| K  reorder 100 ms | 26.7 MB/s |
+
+* Phone on the same network: 180 Mb/s (~22 MB/s). The driver now does ~260-330 Mb/s on one TCP stream.
+* The speed differences between the A-MSDU-off rows are run-to-run variance of one 10 s transfer on a shared channel; power
+  tables, reorder timeout and 80 vs 160 MHz give no consistent effect. Defaults stay: no tables sent at join is still the
+  boot-arg `itlmt_nopwr`; recommended boot-args `itlmt_fast=6` (A-MSDU off is the default now).
+* With A-MSDU on the RXD4 payload format shows the expected first / middle / last mix (`ai=0/375/290/366`) but every packet
+  carries exactly one subframe (`subs=0/1031/0/0/0`), bundles never overflow (`ovf=0`) and nothing is "bigdrop". The loss is
+  not in the unpack; why TCP collapses with A-MSDU is chưa xác định and is left off. 1400 B pings to 1.1.1.1 still lose 70 %
+  at every level (chưa xác định, not a driver symptom: TCP runs at 33 MB/s).
