@@ -196,7 +196,7 @@ uint8_t itlmt7925::fastSig(uint8_t level)
 {
     bool g2 = tgtCh <= 14;
     uint8_t bw, center;
-    itl_caps_channel(&apCaps, tgtCh, level >= 5 && !g2, &bw, &center);
+    itl_caps_channel(&apCaps, tgtCh, level >= 5 && !g2 && !no160, &bw, &center);
     return (level >= 4 ? 1 : 0) | ((level >= 6 && apCaps.he) ? 2 : 0) | (bw == 3 ? 4 : 0);
 }
 
@@ -216,7 +216,7 @@ void itlmt7925::m3FastPlan()
         baLog("fast off ch=%u ht=%d", tgtCh, apCaps.ht ? 1 : 0);
         return;
     }
-    itl_caps_channel(&apCaps, tgtCh, lvl >= 5 && !g2, &fastBw, &fastCenter);
+    itl_caps_channel(&apCaps, tgtCh, lvl >= 5 && !g2 && !no160, &fastBw, &fastCenter);
     fastAllow160 = fastBw == 3;
     fastAmsdu = lvl >= 4;
     fastHe = lvl >= 6 && apCaps.he;
@@ -1143,6 +1143,10 @@ bool itlmt7925::m3RxData(const uint8_t *p, uint32_t len)
             rxdLogged++;
             baLog("rxd len=%u d1=%08x d2=%08x d4=%08x hdr@%u fc=%02x%02x qc=%02x", len, le32(p + 4), le32(p + 8), le32(p + 16), off, fc0, fc1, qc);
         }
+        if (qos && !group && !(fc0 & 0x40) && !(((qc >> 7) & 1) && ai && ai != 3)) {   // one count per MPDU (A-MSDU: first subframe)
+            stRxPkt++;
+            if (fc1 & 0x08) stRxRetry++;
+        }
         if (fc0 & 0x40) {                                                    // null / QoS null: no payload, but it owns a sequence number
             amsduFlush();
             if (reorder) itl_reorder_rx(&rxBa[tid].r, sn, nullptr, 0, nowMs(), baDeliverCb, this);
@@ -1492,6 +1496,7 @@ void itlmt7925::m3Link()
     txSn = 0;
     rxLastValid = 0;
     stRxDupL = 0;
+    stRxRetry = stRxPkt = 0;
     stRxUni = stTxUni = 0;
     stAmsduPkt = stAmsduSub = stAmsduBad = 0;
     txfWinFree = stTxFree;
@@ -1599,10 +1604,10 @@ void itlmt7925::m3Link()
             }
             char st[400];
             snprintf(st, sizeof(st),
-                     "up=%us L%u rxd=%u eapol=%u eth=%u drop=%u tx=%u fail=%u rxpk=%u uni=%u/%u ba=%u/%u reo=%u/%u/%u/%u/%u/%u/%u/%u txf=%u/%u/%u/%u/%u am=%u/%u/%u/%u",
+                     "up=%us L%u rxd=%u eapol=%u eth=%u drop=%u tx=%u fail=%u rxpk=%u uni=%u/%u ba=%u/%u reo=%u/%u/%u/%u/%u/%u/%u/%u txf=%u/%u/%u/%u/%u am=%u/%u/%u/%u rty=%u/%u bw=%u",
                      up, lvl, stRxData, stRxEapol, stRxEth, stRxDrop, stTx, stTxFail, rxPkts, stRxUni, stTxUni, stBaRxOn, stBaTxOn, ri, rd_,
                      rb, rdup, rold, rfl, rto, rlate, stTxFree, stTxReclaim, stTxNoSlot, stTxFwFail, stTxFwRetry, stAmsduPkt, stAmsduSub, stAmsduBad,
-                     stRxBigDrop);
+                     stRxBigDrop, stRxRetry, stRxPkt, fastActive ? fastBw : 0);
             nvramStat(st);
             nvramChunks(m3buf);
             wifiLink();

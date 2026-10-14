@@ -540,6 +540,8 @@ void itlmt7925::m1Main()
     }
     uint32_t reo = 0;
     if (PE_parse_boot_argn("itlmt_reo", &reo, sizeof(reo)) && reo >= 5 && reo <= 500) reoMs = reo;
+    uint32_t no160 = 0;
+    if (PE_parse_boot_argn("itlmt_no160", &no160, sizeof(no160)) && no160) this->no160 = true;
     uint32_t fast = 0;
     if (PE_parse_boot_argn("itlmt_fast", &fast, sizeof(fast)) && fast) {
         m3fast = true;

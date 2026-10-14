@@ -738,3 +738,40 @@ Reading: ping with 1400 B packets is clean, bulk TCP is not. A 10 % loss rate on
   WARP off and compare with the table above and with the phone. If the speed is still low with no ring drops, the next
   suspects are (in this order): 160 MHz (`itlmt_fast=4` boot-arg removes level 5/6 and 160 MHz for an A/B), reorder timeouts
   (5.7 %), firmware retries (0.9 per frame), repeated RX block-ack renegotiation (`ba-log`: ssn 1, 2, 3 and `rx ba stopped`).
+
+### Round 24 result and round 25 (2026-10-14)
+
+Boot with round 24 (native only), same network, WARP off, `itlmt_fast=6`, level 6, ch 40, `bw 3` (160 MHz), RSSI -38 dBm.
+
+| Counter / measurement | Round 23b | Round 24 |
+|---|---|---|
+| `itlmt_rx_drop` / `itlmt_rx_ringfull` | 63981 of about 649000 (9.8 %) | **0 / 0** (`itlmt_rx_ringpeak` 502 of 512) |
+| `curl` download, several hosts | 56-61 KB/s | **23-66 KB/s: unchanged** |
+| ping 1400 B to the gateway | 4-24 ms | 2.5-20 ms, 0 % loss |
+| frames received in the first 94 s | n/a | 321878 unicast (a burst of about 3000 frames/s, ~35 Mb/s) |
+| frames received afterwards | n/a | about 50 frames/s while `curl` ran |
+
+The ring fix removed the host-side loss but did not change the speed, so it was not the limit. A burst at boot proves the link
+can carry tens of Mb/s; later it does not. Counters during a 10 s `curl` (about 450 received MPDUs):
+
+* reorder: 278 direct, 134 buffered (30 % out of order), 29 old (6 %), 82 timeouts, 4 late. Totals at 300 s:
+  `reo=227975/151875/51394/3270/21323/5788/5717/113` = 9.4 % old (the AP re-sent MPDUs already delivered), 2.5 % timeouts that
+  were never filled (late 113 of 5717).
+* TX: 0.7 firmware retries per frame (`txf=.../116619`), `fwfail` 265, `noslot` 1289.
+* `netstat -s`: 0 bad checksums, 0 TCP retransmits on the host side, no fragments: nothing is lost after the driver.
+* `itlmt_rx_oversize` 0. Rx data ring 1536 entries (not an overrun). Group-addressed frames already bypass the reorder buffer.
+
+Reading: the AP keeps re-sending frames we already acknowledged in hardware (our Block Acks / ACKs do not reach it) and
+our own frames need 1.7 attempts each: an uplink / control-response problem, which on a 160 MHz HE link at -38 dBm points
+at the 160 MHz configuration (control-response bandwidth or rate, or the channel config sent to the firmware). The 30 ms
+reorder timeout turns every hole that is never filled into a 30 ms stall of the whole TID.
+
+**Round 25 (installed, reboot pending):**
+
+* New boot-arg `itlmt_no160=1`: `itl_caps_channel` is asked for at most 80 MHz at levels 5 and 6 (HE stays on).
+  Boot-args now: `itlmt_fast=6 itlmt_no160=1 itlmt_reo=10` (reorder timeout 10 ms instead of 30 ms).
+* `stat-log` gets `rty=<retry-bit MPDUs>/<all unicast QoS MPDUs>` (the AP resend ratio measured directly) and `bw=<fastBw>`.
+* Install: core `283a29ea...`, native `a7c3d255...`; backups `build/esp-backup-{core,native}-round25-pre.kext` (core b8c1ea53...,
+  native 2e9345b7...) and `build/config.plist.round25-pre`. Undo: copy the backups back, `occonfig.py ... args del itlmt_no160 itlmt_reo`.
+* **One reboot, read:** `stat-log` shows `bw=2`; `rty=` ratio; `old` / `timeout` shares of `reo=`; `curl` speed; then A/B by
+  removing `itlmt_no160` (160 MHz back) and `itlmt_reo` (30 ms) one at a time only if 80 MHz is also slow.

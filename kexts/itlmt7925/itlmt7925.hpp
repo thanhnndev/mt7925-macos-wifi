@@ -298,6 +298,9 @@ private:
     // 100 ms; measured here: 1258 timeouts in 536 s at 100 ms = 23 % of the time with the receive path held, while a hole is
     // either filled by the AP's retry within a few ms or never. 30 ms keeps the retries and cuts the stalls.
     uint32_t reoMs = 30;
+    // Boot-arg itlmt_no160=1: never run a 160 MHz channel (level 5/6 stay 80 MHz; HE keeps working). A/B for 160 MHz links where
+    // the AP re-sends ~9 % of the frames already received (its Block Acks from us do not arrive) and holes never fill.
+    bool no160 = false;
     char rssiProbe[700] = {0};               // RXD layout samples of the first beacons with RX vector, for the signal decoder
     uint8_t rssiProbeN = 0;
     // A-MSDU receive (level 4): the hardware splits an A-MSDU into one RX packet per subframe (first / middle / last in RXD4),
@@ -311,6 +314,7 @@ private:
     uint16_t rxLastSn[9] = {};
     uint16_t rxLastValid = 0;
     uint32_t stRxDupL = 0;
+    uint32_t stRxRetry = 0, stRxPkt = 0;     // unicast QoS data MPDUs with the Retry bit / all unicast QoS data MPDUs (AP resends)
     uint32_t txfWinFree = 0, txfWinFail = 0, txfBad = 0;   // TX failure watchdog (level >= 3), 5 s windows
     volatile bool ethStalled = false;        // the Ethernet output queue is stalled on a full TX pool (under txLock)
     uint32_t ethStallMs = 0;
