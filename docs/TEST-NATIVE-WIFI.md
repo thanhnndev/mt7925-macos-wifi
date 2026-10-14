@@ -691,3 +691,50 @@ DHCP answered nowhere, `no unicast frame received in 15s` at levels 6, 5, 3, 1 a
   `itlmt_rx_received` > 0; `ipconfig getifaddr <wifi>`; `wifi-events` shows `up lvl 6` and no `no unicast frame`.
 * **Noted, not changed:** the first join after boot can fail with `auth-fail` (4 authentication frames unanswered although frames
   were received) and succeed on the retry; the interface BSD name is now `en2` (was `en4`) because the service order changed.
+
+## Speed measurements (2026-10-14, round 23b, core b8c1ea53..., native b8b7fdfe...)
+
+Reference numbers, same machine, same boot. `itlmt_fast=6`, the link came up at level 6 on a 5 GHz channel (ch 40); RSSI about
+-37 / -38 dBm (very close to the AP); `wifi-rate` 2402 Mb/s and one `up lvl 6 ch 40 bw 3` (160 MHz) event in `wifi-events`.
+Measured by `curl` of a 20 MB object from a public speed-test host, `ping`, and the driver counters in `ioreg`.
+
+| Condition | Result |
+|---|---|
+| Cloudflare WARP on, 1 flow | about 20 Mb/s (ping 41-66 ms) |
+| Cloudflare WARP on, 4 flows | about 23 Mb/s aggregate |
+| Cloudflare WARP on, upload | about 21 Mb/s |
+| WARP off, `curl` download (20 MB / 30 s, 15 s) | 61 KB/s and 56 KB/s, about 0.45-0.5 Mb/s |
+| WARP off, the user's own browser test | about 270 Kb/s |
+| Phone on the same network (fast.com) | 180 Mb/s |
+| Ping to the gateway, 1400 B, WARP off | 4-24 ms, average 12 ms, 0 % loss |
+| Ping 1.1.1.1, WARP off | 31-41 ms, 0 % loss |
+
+The WARP-on and WARP-off runs were on different subnets (different AP or network), so they are not comparable with each other;
+only the WARP-off row and the phone share a network.
+
+Driver counters at the WARP-off run (core `stat-log` `up=295s`):
+
+* `itlmt_rx_received` 585211, `itlmt_rx_delivered` 585211, **`itlmt_rx_drop` 63981** (9.8 % of all RX frames offered), no
+  `dp:RX failed` line: every drop was the 64-frame ring in `receiveFromCore` being full.
+* `itlmt_tx_sent` 461937, `itlmt_tx_stall` 6357, `itlmt_tx_drop` 0.
+* `stat-log`: `reo=13969/11135/1902/91/815/791/791/26` (reorder timeouts 791 of 13969, 5.7 %), `txf=460267/0/4954/942/420427`
+  (about 0.9 firmware retries per frame).
+
+Reading: ping with 1400 B packets is clean, bulk TCP is not. A 10 % loss rate on a 30 ms path limits one TCP flow to about
+1 Mb/s, which is the order of magnitude seen. The loss is inside the driver, not on air.
+
+### Round 24: RX ring and drain (native kext only)
+
+* **Cause:** `datapathTick` ran every 10 ms, delivered at most 32 frames per tick (a ceiling of 3200 frames/s) and the ring between
+  the core worker and the tick held 64. A burst (a block-ack reorder flush or an A-MSDU unpack gives tens of frames at once)
+  overflowed it.
+* **Change (`itlmt7925_iface.cpp/.h`):** ring 512 frames, up to 128 per tick, tick 2 ms. `pollControl()` still runs every 10 ms
+  because the scan / join timeouts count in 10 ms polls. Properties are published once a second now.
+* **New properties on the interface node:** `itlmt_rx_ringfull` (ring-full drops), `itlmt_rx_oversize` (bad length),
+  `itlmt_rx_ringpeak` (deepest backlog). `itlmt_rx_drop` stays the sum plus delivery failures.
+* **Install:** native only; backup `build/esp-backup-native-round24-pre.kext` (the round 23b binary, b8b7fdfe...), installed
+  2e9345b7.... Core unchanged. Undo: copy the backup over `/Volumes/ESP/EFI/OC/Kexts/itlmt7925Native.kext`.
+* **One reboot, read:** `itlmt_rx_ringfull` must be 0 or tiny and `itlmt_rx_ringpeak` below 512; then `curl` a large object with
+  WARP off and compare with the table above and with the phone. If the speed is still low with no ring drops, the next
+  suspects are (in this order): 160 MHz (`itlmt_fast=4` boot-arg removes level 5/6 and 160 MHz for an A/B), reorder timeouts
+  (5.7 %), firmware retries (0.9 per frame), repeated RX block-ack renegotiation (`ba-log`: ssn 1, 2, 3 and `rx ba stopped`).

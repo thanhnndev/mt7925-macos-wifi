@@ -140,8 +140,9 @@ AWDL-side request.
 
 ## 8. Wi-Fi improvement backlog (measured 2026-10-14, level 6, ch 40 / 80 MHz, through Cloudflare WARP)
 
-* [ ] Remeasure without WARP (`networkQuality -I <wifi>`); with WARP the single-flow 20 Mb/s and 4-flow 23 Mb/s plateau is not
-      attributable to the link yet.
+* [x] Remeasured without WARP: about 0.5 Mb/s against 180 Mb/s on a phone of the same network; cause found, the 64-frame RX
+      ring dropped 9.8 % of frames (see "Speed measurements" and "Round 24" in [TEST-NATIVE-WIFI.md](TEST-NATIVE-WIFI.md)). Fix
+      installed, result after the next reboot.
 * [ ] Firmware retry ratio about 0.8 per TX header at level 6 (`txf=..` in `stat-log`): check rate adaptation (STA_REC_RA) inputs
       and whether the retries are probing or loss.
 * [ ] RX reorder timeouts about 0.8 % (`reo=` timeout / late fields): holes that never fill; compare BA scoreboard handling.

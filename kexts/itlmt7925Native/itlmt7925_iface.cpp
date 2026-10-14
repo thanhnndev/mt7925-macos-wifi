@@ -343,7 +343,7 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
     uint32_t dp = 0;
     if (PE_parse_boot_argn("itlmt_native_dp", &dp, sizeof(dp)) && dp) {
         core = controller->getProvider();
-        rxRing = (RxFrame *)IOMalloc(sizeof(RxFrame) * 64);
+        rxRing = (RxFrame *)IOMalloc(sizeof(RxFrame) * kRxRing);
         snap = (ItlNativeAp *)IOMalloc(sizeof(ItlNativeAp) * ITL_NATIVE_AP_MAX);
         dpTimer = IOTimerEventSource::timerEventSource(this, datapathTick);
         if (!core || !rxRing || !snap || !dpTimer || queued->addEventSource(dpTimer) != kIOReturnSuccess) {
@@ -356,7 +356,7 @@ bool itlmt7925WifiInterface::startWithInfo(IO80211Controller *controller, IOSkyw
         itlmtTrace(ctl, "dp:bind=%x", br);
         if (br != kIOReturnSuccess) { destroyPoolAndQueues(); return false; }
         IOLockLock(rxLock); bound = true; IOLockUnlock(rxLock);
-        dpTimer->setTimeoutMS(10);
+        dpTimer->setTimeoutMS(kTickMs);
     }
 
     headroom = field<uint16_t>(info, 0x3c);
@@ -408,7 +408,7 @@ void itlmt7925WifiInterface::destroyPoolAndQueues()
         }
         memmove(pendingTx, pendingTx + 1, (--pendingCount) * sizeof(pendingTx[0]));
     }
-    if (rxRing) { IOFree(rxRing, sizeof(RxFrame) * 64); rxRing = nullptr; }
+    if (rxRing) { IOFree(rxRing, sizeof(RxFrame) * kRxRing); rxRing = nullptr; }
     if (snap) { IOFree(snap, sizeof(ItlNativeAp) * ITL_NATIVE_AP_MAX); snap = nullptr; }
     scanActive = joinActive = false;
     core = nullptr;
@@ -518,7 +518,7 @@ IOReturn itlmt7925WifiInterface::enableDatapath()
     dpEnabled = true;
     setRunningState(true);
     setProperty("itlmt_datapath_enabled", true);
-    dpTimer->setTimeoutMS(10);
+    dpTimer->setTimeoutMS(kTickMs);
     itlmtTrace(ctl, "dp:enabled");
     return kIOReturnSuccess;
 }
@@ -660,12 +660,15 @@ void itlmt7925WifiInterface::receiveFromCore(OSObject *owner, const uint8_t *byt
     auto *i = (itlmt7925WifiInterface *)owner;
     if (!i->rxLock) return;
     IOLockLock(i->rxLock);
-    uint32_t next = (i->rxHead + 1) % 64;
-    if (!i->rxRing || !bytes || length < 14 || length > 1600 || next == i->rxTail) i->rxDropped++;
+    uint32_t next = (i->rxHead + 1) % kRxRing;
+    if (!i->rxRing || !bytes || length < 14 || length > 1600) { i->rxDropped++; i->rxOversize++; }
+    else if (next == i->rxTail) { i->rxDropped++; i->rxRingFull++; }
     else {
         RxFrame &f = i->rxRing[i->rxHead];
         f.length = length; memcpy(f.bytes, bytes, length);
         i->rxHead = next; i->rxReceived++;
+        uint32_t depth = (next + kRxRing - i->rxTail) % kRxRing;
+        if (depth > i->rxPeak) i->rxPeak = depth;
     }
     IOLockUnlock(i->rxLock);
 }
@@ -731,11 +734,11 @@ void itlmt7925WifiInterface::drainDatapath()
     }
     if (dpEnabled) {
         // RX copies are moved onto the native gate; core worker never acquires this gate.
-        for (uint32_t batch = 0; batch < 32; batch++) {
+        for (uint32_t batch = 0; batch < kRxBatch; batch++) {
             RxFrame f;
             IOLockLock(rxLock);
             bool ready = rxHead != rxTail;
-            if (ready) { f = rxRing[rxTail]; rxTail = (rxTail + 1) % 64; }
+            if (ready) { f = rxRing[rxTail]; rxTail = (rxTail + 1) % kRxRing; }
             IOLockUnlock(rxLock);
             if (!ready) break;
             if (!firstRxTrace) { firstRxTrace = true; itlmtTrace(ctl, "dp:RX allocation/enqueue begin"); }
@@ -794,10 +797,13 @@ void itlmt7925WifiInterface::drainDatapath()
         }
         for (uint32_t i = 0; i < kNumTx; i++) txSub[i]->requestDequeue(nullptr, 1);
     }
-    if ((++ticks % 100) == 0) {
+    if ((++ticks % 500) == 0) {         // once a second at the 2 ms tick
         IOLockLock(rxLock);
-        uint32_t received = rxReceived, dropped = rxDropped;
+        uint32_t received = rxReceived, dropped = rxDropped, full = rxRingFull, oversize = rxOversize, peak = rxPeak;
         IOLockUnlock(rxLock);
+        setProperty("itlmt_rx_ringfull", (uint64_t)full, 64);
+        setProperty("itlmt_rx_oversize", (uint64_t)oversize, 64);
+        setProperty("itlmt_rx_ringpeak", (uint64_t)peak, 32);
         setProperty("itlmt_tx_sent", (uint64_t)txSent, 64);
         setProperty("itlmt_tx_drop", (uint64_t)txDropped, 64);
         setProperty("itlmt_tx_stall", (uint64_t)txStalled, 64);
@@ -808,8 +814,8 @@ void itlmt7925WifiInterface::drainDatapath()
         setProperty("itlmt_tx_pending", (uint64_t)pendingCount, 32);
         setProperty("itlmt_tx_checksum_failed", (uint64_t)txChecksumFailures, 64);
     }
-    pollControl();
-    dpTimer->setTimeoutMS(10);
+    if ((ticks % (10 / kTickMs)) == 0) pollControl();   // scan/join/re-announce timeouts count in 10 ms polls
+    dpTimer->setTimeoutMS(kTickMs);
 }
 
 // ---- IO80211InfraProtocol handlers with layouts taken from Apple's AppleBCMWLANCore (24H32) ---------------------------------

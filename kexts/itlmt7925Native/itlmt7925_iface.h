@@ -106,8 +106,12 @@ private:
     IOTimerEventSource *dpTimer = nullptr;
     IOLock *rxLock = nullptr;
     struct RxFrame { uint32_t length; uint8_t bytes[1600]; };
+    // Measured 2026-10-14: a 64-frame ring drained 32 frames per 10 ms tick dropped 9.8 % of received frames (all ring-full) and
+    // collapsed TCP to about 0.5 Mb/s. 512 frames, up to 128 per 2 ms tick; the pool (0x1300 packets) and RX queue (0x400) hold that.
+    static const uint32_t kRxRing = 512, kRxBatch = 128, kTickMs = 2;
     RxFrame *rxRing = nullptr;
     uint32_t rxHead = 0, rxTail = 0;
+    uint32_t rxRingFull = 0, rxOversize = 0, rxPeak = 0;       // reasons behind rxDropped (guarded by rxLock)
     IOSkywalkPacket *pendingTx[512] = {};
     uint32_t pendingCount = 0;
     bool dpEnabled = false, bound = false, radioUp = false;
