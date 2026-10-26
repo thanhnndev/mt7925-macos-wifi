@@ -29,6 +29,8 @@ The native Wi-Fi front end is merged into `main` and under test. AWDL is a **sep
 * `awdl0` exists, has an IPv6 link-local address, and `sharingd` browses and serves `_airdrop._tcp` over it.
 * Clean-room: no OWL / OpenDrop / opendrop-awdl source is copied (GPL). Protocol facts come from the published papers and from
   read-only inspection of Apple's 24H32 collection, like the rest of the native driver.
+  Amended 2026-10-26 (project owner): OWL and OpenDrop may be read for protocol facts only; nothing is copied and the facts are
+  restated in our own words with their sources in `docs/AWDL-PROTOCOL-REFERENCE.md`.
 
 ## 2. What AirDrop needs (stack, top to bottom)
 
