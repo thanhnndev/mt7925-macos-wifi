@@ -1,7 +1,8 @@
 name: import-releases
 
 # One-off: copies the Wi-Fi assets of the releases published in thanhnndev/ga403wm-hackintosh (where this driver was developed
-# until 2026-10) into this repository, as releases v1.0 and v1.1 on the matching (history-preserving) tags.
+# until 2026-10) into this repository, as releases v1.0 and v1.1. The tags are created by the release itself, on the commits the
+# old tags pointed to (history was kept by the split, so those commits exist here on branch sequoia).
 # Run it from the Actions tab once; it skips a release that already exists.
 on:
   workflow_dispatch:
@@ -20,15 +21,15 @@ jobs:
           SRC: thanhnndev/ga403wm-hackintosh
         run: |
           set -euo pipefail
-          copy_release() {   # <source tag> <new tag> <assets...>
-            local src=$1 dst=$2; shift 2
+          copy_release() {   # <source tag> <new tag> <commit> <assets...>
+            local src=$1 dst=$2 sha=$3; shift 3
             if gh release view "$dst" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "$dst exists, skipped"; return; fi
             rm -rf "in-$dst"; mkdir "in-$dst"
             for a in "$@"; do gh release download "$src" --repo "$SRC" --pattern "$a" --dir "in-$dst"; done
             (cd "in-$dst" && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
-            gh release create "$dst" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            gh release create "$dst" --repo "$GITHUB_REPOSITORY" --target "$sha" \
               --title "$(head -1 ".github/release-notes/$dst.md" | sed 's/^# *//')" \
               --notes-file ".github/release-notes/$dst.md" "in-$dst"/*
           }
-          copy_release v1        v1.0 itlmt7925.kext.zip ItlWiFi.app.zip LICENCE.mediatek LICENSE
-          copy_release kext-v1.1 v1.1 itlmt7925.kext.zip itlmt7925Native.kext.zip ItlWiFi.app.zip LICENCE.mediatek LICENSE
+          copy_release v1        v1.0 8564420d8f6a6187a3e189e7349c0fa0c54a9f54 itlmt7925.kext.zip ItlWiFi.app.zip LICENCE.mediatek LICENSE
+          copy_release kext-v1.1 v1.1 e6ef0b067f03e45dd3e9c04035f06a994b5db888 itlmt7925.kext.zip itlmt7925Native.kext.zip ItlWiFi.app.zip LICENCE.mediatek LICENSE
