@@ -967,7 +967,7 @@ en5), the core scanned at boot (`scan finished done=1@2410ms rx=85 bcn=83 aps=48
 menu built was garbled**.
 
 Collection, driver trace, NVRAM checkpoints and the layout evidence:
-[`docs/native-wifi-results/20261016-tahoe-first-load-73fe4ce4/`](../native-wifi-results/20261016-tahoe-first-load-73fe4ce4/README.md).
+[`docs/native-wifi-results/20261016-tahoe-first-load-73fe4ce4/`](native-wifi-results/20261016-tahoe-first-load-73fe4ce4/README.md).
 
 Cause: the `0xc9` beacon message header is **0x44**, not 0x40. From the 25G241 `BootKernelExtensions.kc` (verified
 2026-10-16 on the mounted System volume):
@@ -1004,7 +1004,7 @@ a 512-byte element, `IO80211BSSBeacon::setBeaconDataFromMsg + 0x2c` → `_memmov
 `RCX = 4`.
 
 What the registers decode to (full walk-through in
-[`docs/native-wifi-results/20261017-panic-kalloc512/`](../native-wifi-results/20261017-panic-kalloc512/README.md)):
+[`docs/native-wifi-results/20261017-panic-kalloc512/`](native-wifi-results/20261017-panic-kalloc512/README.md)):
 
 * The element is the family's queue entry for one 0xc9 scan result: 0x20 header + 0x1e0 payload
   (`IO80211Glue::addEventToPendingQueue` allocates `length + 0x20` and copies the payload).
@@ -1050,7 +1050,7 @@ it, and `CCDataPipe::enqueueBlob` dereferences that timer without a null check. 
 `CCPipe::startPipe`, virtual at vtable slot +0x868. Fixed in `kexts/itlmt7925Native`: `ccPipeStartPipe()` (raw slot call,
 documented in `corecapture_min.h`) now runs on both pipes right where Apple runs it, plus a `ctl:faultPipe=<0|1>` start
 trace. Full walk-through with the 25G241 disassembly:
-[`docs/native-wifi-results/20261017-panic-corecapture/`](../native-wifi-results/20261017-panic-corecapture/README.md).
+[`docs/native-wifi-results/20261017-panic-corecapture/`](native-wifi-results/20261017-panic-corecapture/README.md).
 Installed 2026-10-17 11:03 (Linux, no reboot yet): `build-kexts` run 39000943950 on `bff6b30` →
 `/boot/EFI/OC/Kexts/itlmt7925Native.kext`, sha256 `7ddc713b…` (the IE-cap build it replaces is kept as
 `Kexts-backup/itlmt7925Native.kext.20261017-110334`, sha256 `88499c27…`). Next boot: `ioreg -l | grep itlmt_native_trace`
@@ -1065,7 +1065,7 @@ fault report's core capture made `corecaptured` segfault, so every boot had a `c
 older than 60 s, and `ctx+0x158` is only refreshed by `WCLNetManager::handleLqmUpdate` — the handler for **driver event
 0x27** (`apple80211_lqm_event_data`, 0x1dc bytes, exactly what `AppleBCMWLANCore::postLQMEvent` sends). This driver never
 posted it. Full walk-through with the 25G241 disassembly (dispatch table, gates, fault path):
-[`docs/native-wifi-results/20261017-lqm-beacon-monitor/`](../native-wifi-results/20261017-lqm-beacon-monitor/README.md).
+[`docs/native-wifi-results/20261017-lqm-beacon-monitor/`](native-wifi-results/20261017-lqm-beacon-monitor/README.md).
 
 Fixed in this build (both kexts rebuilt):
 

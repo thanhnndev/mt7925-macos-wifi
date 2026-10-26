@@ -1,0 +1,93 @@
+name: build
+
+# Host tests + both kexts (itlmt7925 core, itlmt7925Native front end) + the ItlWiFi menu bar app, on every push and PR.
+# Kexts are built with EMPTY Wi-Fi credentials; credentials are only ever injected locally.
+# A tag "v*" (for example v2.0-beta.1) also publishes a GitHub release with the zipped kexts, the app and SHA256SUMS.txt.
+# Tags with a "-" (v2.0-beta.1, v2.0-rc.1) are published as pre-releases.
+on:
+  push:
+    branches: [main, dev/**, sequoia]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  credentials:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: itlmt7925 Info.plist carries no Wi-Fi credentials
+        run: |
+          python3 - <<'PY'
+          import plistlib, sys
+          c = plistlib.load(open("kexts/itlmt7925/Info.plist", "rb"))
+          bad = [f"{p}:{k}" for p, d in c.get("IOKitPersonalities", {}).items()
+                 for k, v in d.items() if k.startswith(("itl_ssid", "itl_psk")) and v]
+          if bad:
+              sys.exit("credentials present in Info.plist: " + ", ".join(bad))
+          print("ok: itl_ssid*/itl_psk* are empty")
+          PY
+
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host test - WPA2 crypto (PMK / PTK / MIC / key unwrap)
+        working-directory: test
+        run: clang++ -std=c++17 -I../kexts/itlmt7925 wpa_test.cpp ../kexts/itlmt7925/itl_wpa.cpp -o wpa_test && ./wpa_test
+
+      - name: Host test - HT / VHT / HE capability parsing
+        working-directory: test
+        run: clang++ -std=c++17 -Wall -I../kexts/itlmt7925 caps_test.cpp ../kexts/itlmt7925/itl_caps.cpp -o caps_test && ./caps_test
+
+      - name: Host test - Block Ack reorder buffer, ADDBA / DELBA / BAR
+        working-directory: test
+        run: clang++ -std=c++17 -Wall -I../kexts/itlmt7925 ba_test.cpp ../kexts/itlmt7925/itl_ba.cpp -o ba_test && ./ba_test
+
+      - name: Generated native-interface stubs match the headers
+        run: python3 tools/gen_native_iface.py --check
+
+      - name: Build kexts
+        run: bash scripts/build.sh itlmt7925 itlmt7925Native
+
+      - name: Build ItlWiFi.app
+        run: bash scripts/build-itlwifi.sh
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          for k in itlmt7925 itlmt7925Native; do ditto -c -k --keepParent "build/$k.kext" "dist/$k.kext.zip"; done
+          ditto -c -k --keepParent build/ItlWiFi.app dist/ItlWiFi.app.zip
+          cp fw/LICENCE.mediatek LICENSE dist/
+          (cd dist && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mt7925-wifi-${{ github.sha }}
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [credentials, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mt7925-wifi-${{ github.sha }}
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRE=""; [[ "$GITHUB_REF_NAME" == *-* ]] && PRE="--prerelease"
+          NOTES=".github/release-notes/$GITHUB_REF_NAME.md"
+          [ -f "$NOTES" ] || NOTES=.github/release-notes/default.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" $PRE \
+            --title "$GITHUB_REF_NAME" --notes-file "$NOTES" --generate-notes dist/*

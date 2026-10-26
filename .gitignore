@@ -1,0 +1,8 @@
+# build output
+build/
+dist/
+# never commit a kext: an injected itlmt7925.kext carries Wi-Fi passwords in plain text
+*.kext
+*.zip
+.DS_Store
+__pycache__/
