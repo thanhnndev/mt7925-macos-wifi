@@ -1,0 +1,38 @@
+name: Bug report / hardware report
+description: Something does not work, or a report from a new laptop
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never attach an injected `itlmt7925.kext`**: it holds your Wi-Fi passwords. Replace SSIDs, BSSIDs and MAC addresses in logs.
+  - type: input
+    id: machine
+    attributes: {label: Laptop / board model, placeholder: "ASUS GA403WM"}
+    validations: {required: true}
+  - type: input
+    id: macos
+    attributes: {label: "macOS version and build (sw_vers)", placeholder: "26.7.1 (25G241)"}
+    validations: {required: true}
+  - type: input
+    id: release
+    attributes: {label: Release or commit, placeholder: "v2.0-beta.1"}
+    validations: {required: true}
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [native, legacy (Ethernet), not sure]
+    validations: {required: true}
+  - type: input
+    id: bootargs
+    attributes: {label: "Boot-args (sysctl -n kern.bootargs)"}
+  - type: textarea
+    id: what
+    attributes: {label: What you did and what happened}
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Attach the zipped folder from scripts/native-wifi-test.sh logs. For a panic, paste the first 30 lines."

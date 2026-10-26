@@ -1,0 +1,34 @@
+name: import-releases
+
+# One-off: copies the Wi-Fi assets of the releases published in thanhnndev/ga403wm-hackintosh (where this driver was developed
+# until 2026-10) into this repository, as releases v1.0 and v1.1 on the matching (history-preserving) tags.
+# Run it from the Actions tab once; it skips a release that already exists.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy v1 -> v1.0 and kext-v1.1 -> v1.1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SRC: thanhnndev/ga403wm-hackintosh
+        run: |
+          set -euo pipefail
+          copy_release() {   # <source tag> <new tag> <assets...>
+            local src=$1 dst=$2; shift 2
+            if gh release view "$dst" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "$dst exists, skipped"; return; fi
+            rm -rf "in-$dst"; mkdir "in-$dst"
+            for a in "$@"; do gh release download "$src" --repo "$SRC" --pattern "$a" --dir "in-$dst"; done
+            (cd "in-$dst" && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+            gh release create "$dst" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$(head -1 ".github/release-notes/$dst.md" | sed 's/^# *//')" \
+              --notes-file ".github/release-notes/$dst.md" "in-$dst"/*
+          }
+          copy_release v1        v1.0 itlmt7925.kext.zip ItlWiFi.app.zip LICENCE.mediatek LICENSE
+          copy_release kext-v1.1 v1.1 itlmt7925.kext.zip itlmt7925Native.kext.zip ItlWiFi.app.zip LICENCE.mediatek LICENSE

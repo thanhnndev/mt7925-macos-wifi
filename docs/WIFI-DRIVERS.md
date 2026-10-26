@@ -2,6 +2,11 @@
 
 Tiếng Việt: [bên dưới](#tiếng-việt).
 
+> **Start with [GUIDE.md](GUIDE.md)** ([Tiếng Việt](GUIDE.vi.md)): it is the up-to-date install guide, covering macOS 26 Tahoe
+> (native mode works there since 2026-10-17). This page is the original design note on the two modes, written for Sequoia
+> (2026-10-14); its numbers are the Sequoia measurements. "The reference EFI" means the one in
+> [ga403wm-hackintosh](https://github.com/thanhnndev/ga403wm-hackintosh).
+
 There is **one core driver** and **one optional front end**. They are not two unrelated drivers:
 
 * `itlmt7925.kext` (the **core**) drives the MT7925: firmware, DMA, 802.11 handshake, Block Ack, data path. It always has to be loaded.
@@ -13,7 +18,7 @@ So there are two **modes**, chosen by boot-args only (no kext has to be removed 
 | | **Legacy mode** (default, no `itlmt_native*` boot-arg) | **Native mode** (`itlmt_native=1 ...`) |
 |---|---|---|
 | macOS sees it as | **Ethernet** (`en*`): no Wi-Fi menu, no Wi-Fi pane in System Settings | a **Wi-Fi** interface: Wi-Fi menu and System Settings → Wi-Fi list, scan and join |
-| Network name / password | injected into the core's `Info.plist` ([INSTALL.md §4](INSTALL.md#4-wi-fi-inject-your-network)) or set from the ItlWiFi app | **none in the kext**: join from the Wi-Fi menu / System Settings (WPA2-PSK) |
+| Network name / password | injected into the core's `Info.plist` ([INSTALL.md §4](GUIDE.md#5-legacy-mode-ethernet-style)) or set from the ItlWiFi app | **none in the kext**: join from the Wi-Fi menu / System Settings (WPA2-PSK) |
 | Speed (reference unit, 2026-10-14) | HE / 160 MHz, same data path | **28-36 MB/s** one TCP stream, `networkQuality` 293 Mb/s down, 45 Mb/s up ([numbers](TEST-NATIVE-WIFI.md#round-26d-result-2026-10-14-a-msdu-off--33-41-mbs)) |
 | Status | ✅ stable, the long-tested path | 🔧 **works, still being tested**: not verified across sleep/wake, a long uptime or a chip recovery |
 | Not available in either | WPA3 / SAE, open networks, enterprise, 6 GHz, **AirDrop / AWDL** ([ROADMAP-AWDL.md](ROADMAP-AWDL.md)) | same |
@@ -23,7 +28,7 @@ The shipped reference EFI (`efi/OC/config.plist`) is in **legacy mode**. Native 
 ## Native mode: what to set
 
 Both kexts in `EFI/OC/Kexts` and enabled in `Kernel -> Add`: `itlmt7925.kext` first, then `itlmt7925Native.kext` (both come from
-the release `kext-v1.1` or from `scripts/build.sh itlmt7925 itlmt7925Native`). The core's `itlmt7925_m1.cpp` stays the owner of the
+release `v1.1` (Sequoia) or `v2.*` (Tahoe), or from `scripts/build.sh itlmt7925 itlmt7925Native`). The core's `itlmt7925_m1.cpp` stays the owner of the
 hardware; the native kext only attaches to it.
 
 Boot-args (add with `tools/occonfig.py`, see below):
@@ -92,7 +97,7 @@ Always have a wired or tethered way online before trying native mode.
 
 ## Source and design
 
-Core `kexts/itlmt7925/`, front end `kexts/itlmt7925Native/`; both are built by `scripts/build.sh` and published by the `kext-v*`
+Core `kexts/itlmt7925/`, front end `kexts/itlmt7925Native/`; both are built by `scripts/build.sh` and published by the `v*`
 release workflow. Clean-room (no `itlwm` / `AirportItlwm` / OWL code): the Apple-side contracts were derived from the macOS 24H32
 binaries, read-only. Design and research: [NATIVE-WIFI.md](NATIVE-WIFI.md), [WIFI-AS-WIFI.md](WIFI-AS-WIFI.md),
 [IO80211-ABI.md](IO80211-ABI.md); test log: [TEST-NATIVE-WIFI.md](TEST-NATIVE-WIFI.md).
